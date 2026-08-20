@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 
 const require = createRequire(import.meta.url)
-const projectRoot = resolve(new URL('..', import.meta.url).pathname)
+const projectRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const dshPackage = require.resolve('@deepseek-ai/dsh/package.json')
 const dshBin = join(dshPackage, '..', 'lib', 'bin.js')
