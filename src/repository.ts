@@ -677,7 +677,7 @@ export class SnapshotRepository {
   }
 
   private async syncFile(path: string): Promise<void> {
-    const handle = await this.#fs.open(path, 'r')
+    const handle = await this.#fs.open(path, 'r+')
     try {
       await handle.sync()
     } finally {

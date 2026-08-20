@@ -96,6 +96,18 @@ function recordingFileSystem(failWritePath?: string) {
   return { fs, calls }
 }
 
+function fileSystemRequiringWritableSyncHandles(): FileSystem {
+  return {
+    ...nodeFileSystem,
+    open: async (path: unknown, flags: unknown, ...options: unknown[]) => {
+      if (flags === 'r') {
+        throw Object.assign(new Error('durable sync requires a writable handle'), { code: 'EBADF' })
+      }
+      return (nodeFileSystem.open as unknown as (...args: unknown[]) => Promise<unknown>)(path, flags, ...options)
+    },
+  } as unknown as FileSystem
+}
+
 function swapAfterLstat(target: string, replacement: string, rejectPathReads = false): FileSystem {
   let swapped = false
   return {
@@ -343,6 +355,21 @@ test('publish syncs payloads before the manifest and performs one final rename',
     assert.equal(writes.at(-1)?.endsWith('/manifest.json'), true)
     assert.equal(recording.calls.filter((call) => call.startsWith('sync:')).length, 7)
     assert.equal(recording.calls.filter((call) => call.startsWith('rename:')).length, 1)
+  })
+})
+
+test('publish completes when durable file syncing requires writable handles', async () => {
+  await withHome(async (home) => {
+    const repository = new SnapshotRepository({
+      dshHome: home,
+      fs: fileSystemRequiringWritableSyncHandles(),
+      randomHex: () => 'a1b2c3',
+    })
+
+    await repository.publish(manifestFor(), payloads)
+
+    const manifestText = await readFile(join(snapshotDirectory(home, snapshotId), 'manifest.json'), 'utf8')
+    assert.equal(manifestText.endsWith('\n'), true)
   })
 })
 
