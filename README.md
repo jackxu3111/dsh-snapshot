@@ -146,20 +146,33 @@ The lock is fail-closed: it is never reclaimed by age. If an operation reports
 `BUSY`, first verify that the owner process is stopped and inspect:
 
 ```text
-$DSH_HOME/snapshots/dsh-snapshot/v1/.writer-lock/owner.json
+<resolved-dsh-home>/snapshots/dsh-snapshot/v1/.writer-lock/owner.json
 ```
 
-Only after that verification, remove the exact lock directory manually. On
-macOS/Linux:
+Resolve `<resolved-dsh-home>` the same way the running host did: use its explicit
+DSH Home if it supplied one, otherwise non-blank `DSH_HOME`, otherwise `~/.dsh`.
+Only after that verification, remove the exact lock directory manually. The
+commands below cover the environment/default cases; substitute a host-explicit
+home when applicable. On macOS/Linux:
 
 ```sh
-rm -r "$DSH_HOME/snapshots/dsh-snapshot/v1/.writer-lock"
+dsh_home="${DSH_HOME:-${HOME:?HOME is not set}/.dsh}"
+lock_dir="$dsh_home/snapshots/dsh-snapshot/v1/.writer-lock"
+printf 'Removing verified stale lock: %s\n' "$lock_dir"
+rm -r -- "$lock_dir"
 ```
 
 On Windows PowerShell:
 
 ```powershell
-Remove-Item -LiteralPath "$env:DSH_HOME/snapshots/dsh-snapshot/v1/.writer-lock" -Recurse -Force
+$dshHome = if ([string]::IsNullOrWhiteSpace($env:DSH_HOME)) {
+  Join-Path $HOME '.dsh'
+} else {
+  $env:DSH_HOME
+}
+$lockDir = Join-Path $dshHome 'snapshots/dsh-snapshot/v1/.writer-lock'
+Write-Host "Removing verified stale lock: $lockDir"
+Remove-Item -LiteralPath $lockDir -Recurse -Force
 ```
 
 Never remove a lock held by an active writer. Windows relies on the current

@@ -63,11 +63,30 @@ test('restore captures protection under one writer lock then restores present an
     assert.deepEqual(result.restored, ['home/settings.yaml', 'profile/package.json'])
     assert.deepEqual(result.removed, ['home/cordis.patch.yml'])
     assert.equal(result.restartRequired, true)
-    assert.equal(result.dependencyInstallCommand, 'dsh plugin --profile work install --frozen-lockfile')
+    assert.equal(result.dependencyInstallCommand, 'dsh plugin --profile <profile> install --frozen-lockfile')
     assert.match(result.protectionSnapshotId, /^\d{8}T\d{9}Z-[0-9a-f]{6}$/)
     assert.equal(String(await readFile(resolveWhitelist(home, 'work').get('home/settings.yaml')!)), 'snapshot settings')
     await assert.rejects(readFile(resolveWhitelist(home, 'work').get('home/cordis.patch.yml')!), { code: 'ENOENT' })
     assert.equal(String(await readFile(resolveWhitelist(home, 'work').get('profile/package.json')!)), '{"snapshot":true}\n')
+  })
+})
+
+test('dependency guidance never interpolates a Profile into a shell command', async () => {
+  await withTemporaryDshHome(async (home) => {
+    const unsafeProfile = 'work;echo PWNED'
+    const packagePath = resolveWhitelist(home, unsafeProfile).get('profile/package.json')
+    assert.ok(packagePath)
+    await mkdir(profileRoot(home, unsafeProfile), { recursive: true })
+    await writeFile(packagePath, '{"snapshot":true}\n')
+
+    const graph = services(home)
+    const snapshot = await graph.capture.capture({ profile: unsafeProfile })
+    await writeFile(packagePath, '{"changed":true}\n')
+
+    const result = await graph.restore.restore(snapshot.snapshotId)
+    assert.equal(result.profile, unsafeProfile)
+    assert.equal(result.dependencyInstallCommand, 'dsh plugin --profile <profile> install --frozen-lockfile')
+    assert.equal(result.dependencyInstallCommand.includes(unsafeProfile), false)
   })
 })
 

@@ -133,19 +133,32 @@ dsh --profile <profile>
 持有锁的进程已经停止，再检查：
 
 ```text
-$DSH_HOME/snapshots/dsh-snapshot/v1/.writer-lock/owner.json
+<resolved-dsh-home>/snapshots/dsh-snapshot/v1/.writer-lock/owner.json
 ```
 
-只有完成上述确认后，才手动删除这个准确的锁目录。macOS/Linux：
+`<resolved-dsh-home>` 必须与运行中的宿主一致：优先使用宿主显式指定的 DSH Home，
+否则使用非空白 `DSH_HOME`，最后才是 `~/.dsh`。只有完成上述确认后，才手动删除
+这个准确的锁目录。下面的命令覆盖环境变量/默认值；若宿主显式指定了其他 home，
+请替换为那个实际路径。macOS/Linux：
 
 ```sh
-rm -r "$DSH_HOME/snapshots/dsh-snapshot/v1/.writer-lock"
+dsh_home="${DSH_HOME:-${HOME:?HOME is not set}/.dsh}"
+lock_dir="$dsh_home/snapshots/dsh-snapshot/v1/.writer-lock"
+printf 'Removing verified stale lock: %s\n' "$lock_dir"
+rm -r -- "$lock_dir"
 ```
 
 Windows PowerShell：
 
 ```powershell
-Remove-Item -LiteralPath "$env:DSH_HOME/snapshots/dsh-snapshot/v1/.writer-lock" -Recurse -Force
+$dshHome = if ([string]::IsNullOrWhiteSpace($env:DSH_HOME)) {
+  Join-Path $HOME '.dsh'
+} else {
+  $env:DSH_HOME
+}
+$lockDir = Join-Path $dshHome 'snapshots/dsh-snapshot/v1/.writer-lock'
+Write-Host "Removing verified stale lock: $lockDir"
+Remove-Item -LiteralPath $lockDir -Recurse -Force
 ```
 
 绝不能删除仍被活动 writer 持有的锁。Windows 依赖当前用户的目录 ACL；ACL 是访问
