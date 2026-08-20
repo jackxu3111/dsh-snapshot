@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { basename, isAbsolute, join } from 'node:path'
+import { constants as fsConstants } from 'node:fs'
+import { basename, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 
 import { SnapshotError } from './errors.ts'
 import { nodeFileSystem } from './filesystem.ts'
@@ -22,6 +23,7 @@ import type {
   PresentManifestEntry,
   SnapshotSummary,
 } from './types.ts'
+import type { FileHandle } from './filesystem.ts'
 
 const LOGICAL_PATHS: readonly LogicalPath[] = [
   'home/settings.yaml',
@@ -48,6 +50,8 @@ const MANIFEST_REQUIRED_KEYS = [
   'entries',
 ] as const
 const MANIFEST_OPTIONAL_KEYS = ['label', 'dshVersion'] as const
+const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0
+const READ_ONLY_FLAGS = fsConstants.O_RDONLY | O_NOFOLLOW
 
 type PrimitiveDate = Date | string | number
 
@@ -304,6 +308,121 @@ function payloadPath(snapshotPath: string, entry: PresentManifestEntry): string 
   return join(snapshotPath, 'files', entry.storedName)
 }
 
+function unsupportedNoFollowFlag(error: unknown): boolean {
+  return isNodeError(error) && (error.code === 'EINVAL' || error.code === 'ENOTSUP' || error.code === 'EOPNOTSUPP')
+}
+
+function directoryChainError(cause?: unknown): SnapshotError {
+  return new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot directory is not safe', { cause })
+}
+
+function directoryNotFound(cause?: unknown): SnapshotError {
+  return new SnapshotError('SNAPSHOT_NOT_FOUND', 'Snapshot directory was not found', { cause })
+}
+
+/**
+ * Validate every existing component of a controlled snapshot directory. lstat
+ * is intentional: a symlink in the chain must never be followed by a later
+ * read or readdir call. Missing tail components are allowed only while the
+ * publisher is creating the root.
+ */
+async function ensureDirectoryChain(
+  fs: FileSystem,
+  base: string,
+  target: string,
+  allowMissingTail = false,
+): Promise<void> {
+  const baseAbsolute = resolve(base)
+  const absolute = resolve(target)
+  const remainder = relative(baseAbsolute, absolute)
+  if (remainder === '..' || remainder.startsWith(`..${sep}`) || isAbsolute(remainder)) {
+    throw directoryChainError()
+  }
+  const parts = remainder.split(sep).filter(Boolean)
+  const paths = [baseAbsolute]
+  let current = baseAbsolute
+  for (const part of parts) {
+    current = join(current, part)
+    paths.push(current)
+  }
+
+  for (const path of paths) {
+    let metadata: unknown
+    try {
+      metadata = await fs.lstat(path)
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        if (allowMissingTail) return
+        throw directoryNotFound(error)
+      }
+      throw directoryChainError(error)
+    }
+    if (!isDirectory(metadata)) throw directoryChainError()
+  }
+}
+
+function differentFile(left: unknown, right: unknown): boolean {
+  if (!isRecord(left) || !isRecord(right)) return false
+  const leftDevice = left.dev
+  const rightDevice = right.dev
+  const leftInode = left.ino
+  const rightInode = right.ino
+  return (
+    typeof leftDevice === 'number' &&
+    typeof rightDevice === 'number' &&
+    typeof leftInode === 'number' &&
+    typeof rightInode === 'number' &&
+    (leftDevice !== rightDevice || leftInode !== rightInode)
+  )
+}
+
+/**
+ * Read from an already-open regular file. The initial and post-open lstat
+ * checks protect platforms without O_NOFOLLOW; once the handle is open, a
+ * later path swap cannot redirect the bytes returned by handle.readFile().
+ */
+async function readOpenedRegularFile(
+  fs: FileSystem,
+  path: string,
+  missingCode: 'SNAPSHOT_NOT_FOUND' | 'SNAPSHOT_CORRUPT',
+  message: string,
+): Promise<Buffer> {
+  let handle: FileHandle | undefined
+  try {
+    const beforeOpen = await fs.lstat(path)
+    if (!isRegularFile(beforeOpen)) throw new SnapshotError('SNAPSHOT_CORRUPT', message)
+
+    try {
+      handle = await fs.open(path, READ_ONLY_FLAGS)
+    } catch (error) {
+      if (O_NOFOLLOW === 0 || !unsupportedNoFollowFlag(error)) throw error
+      handle = await fs.open(path, fsConstants.O_RDONLY)
+    }
+
+    const openedMetadata = await handle.stat()
+    if (!isRegularFile(openedMetadata)) throw new SnapshotError('SNAPSHOT_CORRUPT', message)
+    const afterOpen = await fs.lstat(path)
+    if (
+      !isRegularFile(afterOpen) ||
+      differentFile(beforeOpen, openedMetadata) ||
+      differentFile(openedMetadata, afterOpen)
+    ) {
+      throw new SnapshotError('SNAPSHOT_CORRUPT', message)
+    }
+
+    const raw = await handle.readFile()
+    return Buffer.from(raw)
+  } catch (error) {
+    if (error instanceof SnapshotError) throw error
+    if (missingCode === 'SNAPSHOT_NOT_FOUND' && isNodeError(error) && error.code === 'ENOENT') {
+      throw new SnapshotError('SNAPSHOT_NOT_FOUND', message, { cause: error })
+    }
+    throw new SnapshotError('SNAPSHOT_CORRUPT', message, { cause: error })
+  } finally {
+    if (handle !== undefined) await handle.close()
+  }
+}
+
 export class SnapshotRepository {
   readonly #dshHome: string
   readonly #fs: FileSystem
@@ -323,32 +442,20 @@ export class SnapshotRepository {
 
   async readManifest(snapshotId: string): Promise<Manifest> {
     validateSnapshotId(snapshotId)
-    const manifestPath = join(snapshotDirectory(this.#dshHome, snapshotId), 'manifest.json')
-    try {
-      const metadata = await this.#fs.lstat(manifestPath)
-      if (!isRegularFile(metadata)) throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot manifest is not a regular file')
-    } catch (error) {
-      if (error instanceof SnapshotError) throw error
-      if (isNodeError(error) && error.code === 'ENOENT') {
-        throw new SnapshotError('SNAPSHOT_NOT_FOUND', 'Snapshot manifest was not found', { cause: error })
-      }
-      throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot manifest could not be read', { cause: error })
-    }
-
-    let raw: unknown
-    try {
-      raw = await this.#fs.readFile(manifestPath, 'utf8')
-    } catch (error) {
-      if (isNodeError(error) && error.code === 'ENOENT') {
-        throw new SnapshotError('SNAPSHOT_NOT_FOUND', 'Snapshot manifest was not found', { cause: error })
-      }
-      throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot manifest could not be read', { cause: error })
-    }
+    const directory = snapshotDirectory(this.#dshHome, snapshotId)
+    await ensureDirectoryChain(this.#fs, this.#dshHome, snapshotRoot(this.#dshHome))
+    await ensureDirectoryChain(this.#fs, this.#dshHome, directory)
+    const manifestPath = join(directory, 'manifest.json')
+    const raw = await readOpenedRegularFile(
+      this.#fs,
+      manifestPath,
+      'SNAPSHOT_NOT_FOUND',
+      'Snapshot manifest could not be read',
+    )
 
     let value: unknown
     try {
-      const text = typeof raw === 'string' ? raw : Buffer.from(raw as Uint8Array).toString('utf8')
-      value = JSON.parse(text)
+      value = JSON.parse(raw.toString('utf8'))
     } catch (error) {
       throw invalidManifest(error)
     }
@@ -400,8 +507,10 @@ export class SnapshotRepository {
     let temporaryDirectoryCreated = false
 
     try {
+      await ensureDirectoryChain(this.#fs, this.#dshHome, root, true)
       await this.#fs.mkdir(root, { recursive: true, mode: 0o700 })
       await this.#fs.chmod(root, 0o700)
+      await ensureDirectoryChain(this.#fs, this.#dshHome, root)
       try {
         await this.#fs.lstat(finalDirectory)
         throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot id already exists')
@@ -454,28 +563,27 @@ export class SnapshotRepository {
   async preflight(snapshotId: string): Promise<Manifest> {
     const manifest = await this.readManifest(snapshotId)
     const directory = snapshotDirectory(this.#dshHome, snapshotId)
+    try {
+      await ensureDirectoryChain(this.#fs, this.#dshHome, join(directory, 'files'))
+    } catch (error) {
+      throw payloadMismatch(error)
+    }
 
     for (const entry of manifest.entries) {
       if (entry.status !== 'present') continue
       const target = payloadPath(directory, entry)
-      let metadata: unknown
       try {
-        metadata = await this.#fs.lstat(target)
+        const bytes = await readOpenedRegularFile(
+          this.#fs,
+          target,
+          'SNAPSHOT_CORRUPT',
+          'Snapshot payload could not be read',
+        )
+        if (bytes.byteLength !== entry.bytes || sha256(bytes) !== entry.sha256) throw payloadMismatch()
       } catch (error) {
+        if (error instanceof SnapshotError && error.code === 'SNAPSHOT_CORRUPT') throw payloadMismatch(error)
         throw payloadMismatch(error)
       }
-      if (!isRegularFile(metadata)) throw payloadMismatch()
-      const size = isRecord(metadata) ? metadata.size : undefined
-      if (typeof size !== 'number' || size !== entry.bytes) throw payloadMismatch()
-
-      let raw: string | Buffer
-      try {
-        raw = await this.#fs.readFile(target)
-      } catch (error) {
-        throw payloadMismatch(error)
-      }
-      const bytes = typeof raw === 'string' ? Buffer.from(raw, 'utf8') : Buffer.from(raw)
-      if (bytes.byteLength !== entry.bytes || sha256(bytes) !== entry.sha256) throw payloadMismatch()
     }
 
     return manifest
@@ -484,6 +592,13 @@ export class SnapshotRepository {
   async list(_profile?: string): Promise<SnapshotSummary[]> {
     const profile = _profile === undefined ? undefined : validateProfile(_profile)
     const root = snapshotRoot(this.#dshHome)
+    try {
+      await ensureDirectoryChain(this.#fs, this.#dshHome, root)
+    } catch (error) {
+      if (error instanceof SnapshotError && error.code === 'SNAPSHOT_NOT_FOUND') return []
+      throw error
+    }
+
     let rawEntries: unknown[]
     try {
       rawEntries = (await this.#fs.readdir(root, { withFileTypes: true })) as unknown[]
@@ -496,17 +611,18 @@ export class SnapshotRepository {
     for (const rawEntry of rawEntries) {
       const name = entryName(rawEntry)
       if (name === undefined || name.startsWith('.tmp-') || !SNAPSHOT_DIRECTORY_PATTERN.test(name)) continue
+      if (entryIsSymbolicLink(rawEntry)) {
+        if (profile === undefined) summaries.push(corruptSummary(name))
+        continue
+      }
       if (!entryMayBeDirectory(rawEntry)) continue
 
       const directory = snapshotDirectory(this.#dshHome, name)
-      if (typeof rawEntry === 'string') {
-        let metadata: unknown
-        try {
-          metadata = await this.#fs.lstat(directory)
-        } catch {
-          continue
-        }
-        if (!isDirectory(metadata)) continue
+      try {
+        await ensureDirectoryChain(this.#fs, this.#dshHome, directory)
+      } catch {
+        if (profile === undefined) summaries.push(corruptSummary(name))
+        continue
       }
 
       let manifest: Manifest
@@ -520,8 +636,13 @@ export class SnapshotRepository {
 
       if (profile !== undefined && manifest.profile !== profile) continue
       let available = true
+      try {
+        await ensureDirectoryChain(this.#fs, this.#dshHome, join(directory, 'files'))
+      } catch {
+        available = false
+      }
       for (const entry of manifest.entries) {
-        if (entry.status !== 'present') continue
+        if (!available || entry.status !== 'present') continue
         try {
           const metadata = await this.#fs.lstat(payloadPath(directory, entry))
           if (!isRegularFile(metadata) || !isRecord(metadata) || metadata.size !== entry.bytes) {
@@ -577,6 +698,15 @@ function entryMayBeDirectory(value: unknown): boolean {
     return value.isDirectory() as boolean
   } catch {
     return false
+  }
+}
+
+function entryIsSymbolicLink(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.isSymbolicLink !== 'function') return false
+  try {
+    return value.isSymbolicLink() as boolean
+  } catch {
+    return true
   }
 }
 

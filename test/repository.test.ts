@@ -96,6 +96,26 @@ function recordingFileSystem(failWritePath?: string) {
   return { fs, calls }
 }
 
+function swapAfterLstat(target: string, replacement: string, rejectPathReads = false): FileSystem {
+  let swapped = false
+  return {
+    ...nodeFileSystem,
+    lstat: async (path: unknown) => {
+      const metadata = await nodeFileSystem.lstat(path as string)
+      if (!swapped && path === target) {
+        swapped = true
+        await rm(target)
+        await symlink(replacement, target)
+      }
+      return metadata
+    },
+    readFile: async (path: unknown, ...options: unknown[]) => {
+      if (rejectPathReads && path === target) throw new Error('path read must not be used')
+      return (nodeFileSystem.readFile as unknown as (...args: unknown[]) => Promise<unknown>)(path, ...options)
+    },
+  } as unknown as FileSystem
+}
+
 test('sha256 returns the lowercase SHA-256 digest of bytes', () => {
   assert.equal(sha256(Buffer.from('abc')), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
 })
@@ -204,6 +224,52 @@ test('readManifest rejects a manifest symlink instead of following it', async ()
   })
 })
 
+test('readManifest rejects a manifest replaced with a symlink after lstat', async () => {
+  await withHome(async (home) => {
+    const directory = snapshotDirectory(home, snapshotId)
+    await seedManifest(home, snapshotId, manifestFor())
+    const externalManifest = join(home, 'external-manifest.json')
+    await writeFile(externalManifest, JSON.stringify(manifestFor()), 'utf8')
+    const manifestPath = join(directory, 'manifest.json')
+    const repository = new SnapshotRepository({
+      dshHome: home,
+      fs: swapAfterLstat(manifestPath, externalManifest),
+    })
+
+    await assert.rejects(repository.readManifest(snapshotId), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'SNAPSHOT_CORRUPT'
+    })
+  })
+})
+
+test('readManifest rejects a symlinked snapshot directory', async () => {
+  await withHome(async (home) => {
+    await mkdir(snapshotRoot(home), { recursive: true })
+    const externalDirectory = join(home, 'external-snapshot')
+    await mkdir(externalDirectory, { recursive: true })
+    await symlink(externalDirectory, snapshotDirectory(home, snapshotId))
+    const repository = new SnapshotRepository({ dshHome: home })
+
+    await assert.rejects(repository.readManifest(snapshotId), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'SNAPSHOT_CORRUPT'
+    })
+  })
+})
+
+test('list rejects a symlinked snapshot root instead of traversing it', async () => {
+  await withHome(async (home) => {
+    const externalRoot = join(home, 'external-root')
+    await mkdir(externalRoot, { recursive: true })
+    await mkdir(join(home, 'snapshots', 'dsh-snapshot'), { recursive: true })
+    await symlink(externalRoot, snapshotRoot(home))
+    const repository = new SnapshotRepository({ dshHome: home })
+
+    await assert.rejects(repository.list(), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'SNAPSHOT_CORRUPT'
+    })
+  })
+})
+
 test('publish writes payloads before a LF manifest with restrictive modes', async () => {
   await withHome(async (home) => {
     const repository = new SnapshotRepository({
@@ -246,6 +312,24 @@ test('preflight rehashes every present payload and rejects tampering', async () 
 
     await writeFile(join(snapshotDirectory(home, snapshotId), 'files', 'entry-0.bin'), 'tampered')
     await assert.rejects(repository.preflight(snapshotId), SnapshotError)
+  })
+})
+
+test('preflight rejects a payload replaced with a symlink after lstat', async () => {
+  await withHome(async (home) => {
+    const regularRepository = new SnapshotRepository({ dshHome: home, randomHex: () => 'a1b2c3' })
+    await regularRepository.publish(manifestFor(), payloads)
+    const payloadPath = join(snapshotDirectory(home, snapshotId), 'files', 'entry-0.bin')
+    const externalPayload = join(home, 'external-payload.bin')
+    await writeFile(externalPayload, payloads.get('home/settings.yaml') as Buffer)
+    const repository = new SnapshotRepository({
+      dshHome: home,
+      fs: swapAfterLstat(payloadPath, externalPayload),
+    })
+
+    await assert.rejects(repository.preflight(snapshotId), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'SNAPSHOT_CORRUPT'
+    })
   })
 })
 
@@ -332,5 +416,21 @@ test('list is shallow, isolates corrupt siblings, filters profile and ignores te
     const filtered = await repository.list('work')
     assert.equal(filtered.length, 2)
     assert.equal((await repository.list('other')).length, 0)
+  })
+})
+
+test('list marks a payload symlink corrupt without reading its target body', async () => {
+  await withHome(async (home) => {
+    const repository = new SnapshotRepository({ dshHome: home, randomHex: () => 'a1b2c3' })
+    await repository.publish(manifestFor(), payloads)
+    const payloadPath = join(snapshotDirectory(home, snapshotId), 'files', 'entry-0.bin')
+    const externalPayload = join(home, 'external-list-payload.bin')
+    await writeFile(externalPayload, payloads.get('home/settings.yaml') as Buffer)
+    await rm(payloadPath)
+    await symlink(externalPayload, payloadPath)
+
+    const rows = await repository.list()
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0]?.status, 'corrupt')
   })
 })
