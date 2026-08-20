@@ -1,8 +1,9 @@
 # v0.1.0 release checklist
 
-Reviewed locally on 2026-08-20. This document is release evidence, not a
-publication claim. `package.json` remains `private: true`; no GitHub Release or
-npm publication has been created.
+Reviewed locally and in GitHub Actions on 2026-08-21. This document records the
+approved `v0.1.0` release candidate; the final publication URL is recorded after
+tag creation. `package.json` remains `private: true` and npm publication is
+disabled.
 
 ## Specification and adversarial review
 
@@ -47,26 +48,19 @@ The targeted lock and restore suites passed with 34 tests after all fixes.
 
 | Gate | Current evidence | Release state |
 | --- | --- | --- |
-| Compatibility import and packed loader smoke | Public `defineTool` probe is recorded in `docs/compatibility.md`. | Pending a real clean install and `npm run smoke:loader`. |
-| Three tools | Unit tests cover create, list and restore registrations, strict schemas and redaction. | Source-reviewed; rerun in clean install required. |
-| Six-file present/absent round trip | `acceptance.test.ts` covers bytes, modes and absent deletion. | Source-reviewed; clean-install rerun required. |
-| Protection reversal | `acceptance.test.ts` restores the generated protection snapshot. | Source-reviewed; clean-install rerun required. |
-| Tamper rejection before mutation | Repository and restore preflight tests cover digest, manifest and symlink tampering. | Source-reviewed; clean-install rerun required. |
-| Rollback and manual recovery | Fault-injection restore tests cover stage/rename/sync/chmod failures and recovery material. | Targeted restore suite: pass (20/20). |
-| Three operating systems | `.github/workflows/ci.yml` defines Ubuntu, macOS and Windows for Node 22/24. | Pending GitHub Actions evidence. |
-| Package contents | Local `npm pack --dry-run --ignore-scripts` listed 41 files: `dist`, patch, READMEs, LICENSE and metadata; no source, tests, snapshots or credentials. | Informational only: rerun normal pack after clean build. |
+| Compatibility import and packed loader smoke | Public `defineTool` probe is recorded in `docs/compatibility.md`. | Pass: local and GitHub real packed-loader smoke. |
+| Three tools | Unit tests cover create, list and restore registrations, strict schemas and redaction. | Pass in clean local install and CI. |
+| Six-file present/absent round trip | `acceptance.test.ts` covers bytes, modes and absent deletion. | Pass in clean local install and CI. |
+| Protection reversal | `acceptance.test.ts` restores the generated protection snapshot. | Pass in clean local install and CI. |
+| Tamper rejection before mutation | Repository and restore preflight tests cover digest, manifest and symlink tampering. | Pass in clean local install and CI. |
+| Rollback and manual recovery | Fault-injection restore tests cover stage/rename/sync/chmod failures and recovery material. | Pass in the 98-test suite. |
+| Three operating systems | `.github/workflows/ci.yml` covers Ubuntu, macOS and Windows for Node 22/24. | Pass: [GitHub Actions run 32389095727](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389095727). |
+| Package contents | Normal `npm pack --dry-run` listed 41 files: `dist`, patch, READMEs, LICENSE and metadata; no source, tests, snapshots or credentials. | Pass locally and in GitHub Actions. |
 
-## Local-cache verification status
+## Final verification command set
 
-This workspace's dependency cache cannot currently complete a trustworthy clean
-install: `npm ci` left an incomplete dependency tree, and the full suite then
-failed only while importing the missing
-`@deepseek-ai/dsh-llm/lib/index.js` for `acceptance.test.ts` and
-`plugin.test.ts` (86 passed, 2 infrastructure failures). The cached TypeScript
-binary also cannot typecheck that incomplete tree because `@types/node` is
-missing. This is not evidence of a code failure, but it is not a release pass.
-
-Before release, run in a fresh GitHub runner or equivalent clean machine:
+The release candidate passed this command set locally and in clean GitHub
+runners:
 
 ```sh
 npm ci
@@ -79,7 +73,6 @@ npm run smoke:loader
 npm pack --dry-run
 ```
 
-Release remains blocked until that clean-install gate, the real loader smoke,
-and successful Ubuntu/macOS/Windows CI are recorded here. Then verify the pack
-contains only the listed publishable files and obtain explicit authorization
-before any GitHub Release or npm publication.
+Terra High reviewed the complete release candidate after these gates and issued
+an explicit approval with no Critical, High, or Medium findings. GitHub Release
+publication is authorized; npm publication remains disabled.

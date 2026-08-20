@@ -2,10 +2,9 @@
 
 Local, reversible configuration snapshots for DeepSeek Harness (`dsh`) profiles.
 
-> **Publication status:** this repository is prepared for review only. The package is
-> intentionally private and has not been published to npm or to a public GitHub
-> release. The instructions below use a local tarball unless you already have an
-> authorized package spec.
+> **Publication status:** source code and the `v0.1.0` package are distributed through
+> [GitHub Releases](https://github.com/jackxu3111/dsh-snapshot/releases/tag/v0.1.0).
+> The npm package remains intentionally private and has not been published to npm.
 
 ## Compatibility
 
@@ -18,15 +17,20 @@ The implementation targets the public DSH rc.6 interfaces:
 - Node.js `^22.19.0 || >=24.0.0` on macOS, Linux, or Windows
 
 The public `defineTool` import was checked against rc.6. The packed, real-profile
-loader smoke is a release gate and must pass in a network-enabled environment;
-see [`docs/compatibility.md`](docs/compatibility.md) for the recorded evidence
-and remaining verification status.
+loader smoke passed locally and in the release CI; see
+[`docs/compatibility.md`](docs/compatibility.md) for the recorded evidence.
 
 ## Install, restart, and uninstall
 
-The package is not currently available from npm. From this checkout, create the
-local package and add its absolute tarball to an existing or newly initialized
-Profile:
+The package is not available from npm. Install the reviewed `v0.1.0` release
+tarball into an existing or newly initialized Profile:
+
+```sh
+dsh plugin --profile work add https://github.com/jackxu3111/dsh-snapshot/releases/download/v0.1.0/dsh-snapshot-0.1.0.tgz
+```
+
+To build the same package from a checkout instead, create a local tarball and
+add its absolute path:
 
 ```sh
 npm ci
@@ -200,6 +204,8 @@ The loader smoke uses the real rc.6 CLI, installs the packed tarball into an
 isolated Profile, and checks that the installed bundle's `apply` function runs.
 It needs the published DSH dependencies and pnpm available on `PATH`.
 
-This project makes no claim that an npm package or GitHub release exists. Any
-publication requires explicit authorization and a fresh, successful release
-gate.
+Release evidence is recorded in
+[`docs/release-checklist.md`](docs/release-checklist.md) and the successful
+[GitHub Actions run](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389095727).
+The package is distributed only through GitHub Releases; it is not published to
+npm.

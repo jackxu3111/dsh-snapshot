@@ -2,9 +2,9 @@
 
 为 DeepSeek Harness（`dsh`）Profile 提供本地、可回滚的配置快照。
 
-> **发布状态：** 当前仓库只处于评审准备阶段。包被明确设置为私有，尚未发布到
-> npm，也没有公开 GitHub Release。下面的安装流程使用本地 tarball；只有在你已经
-> 获得授权的包规格时，才使用其他规格。
+> **发布状态：** 源代码和 `v0.1.0` 安装包通过
+> [GitHub Releases](https://github.com/jackxu3111/dsh-snapshot/releases/tag/v0.1.0)
+> 发布。npm 包仍明确设置为私有，未发布到 npm。
 
 ## 兼容性
 
@@ -17,13 +17,19 @@
 - Node.js `^22.19.0 || >=24.0.0`，支持 macOS、Linux、Windows
 
 已针对 rc.6 检查公开的 `defineTool` 导出。真实 Profile 的打包 Loader smoke
-仍是发布门禁，必须在可联网环境中通过；证据和当前未完成的验证见
+已在本地和发布 CI 中通过；证据见
 [`docs/compatibility.md`](docs/compatibility.md)。
 
 ## 安装、重启和卸载
 
-当前包尚未发布到 npm。在本仓库中先生成本地包，再把绝对路径的 tarball 添加到
+当前包未发布到 npm。可将已评审的 `v0.1.0` Release tarball 直接安装到
 已有 Profile，或让 DSH 初始化一个新的非默认 Profile：
+
+```sh
+dsh plugin --profile work add https://github.com/jackxu3111/dsh-snapshot/releases/download/v0.1.0/dsh-snapshot-0.1.0.tgz
+```
+
+如需从源码构建同样的包，可在仓库中生成本地 tarball，再传入它的绝对路径：
 
 ```sh
 npm ci
@@ -185,5 +191,7 @@ npm pack --dry-run
 Loader smoke 使用真实 rc.6 CLI，把打包 tarball 安装到隔离 Profile，并确认已安装
 Bundle 的 `apply` 真正执行。它需要公开的 DSH 依赖，以及 PATH 中可用的 pnpm。
 
-本项目没有声称 npm 包或 GitHub Release 已存在。任何发布都必须经过明确授权，并
-通过一次全新的完整发布门禁。
+发布证据记录在
+[`docs/release-checklist.md`](docs/release-checklist.md) 和已通过的
+[GitHub Actions](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389095727)。
+安装包只通过 GitHub Releases 发布，未发布到 npm。

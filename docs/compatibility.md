@@ -1,6 +1,6 @@
 # DSH compatibility evidence
 
-Verified on 2026-08-20 with Node.js 22.23.2 and npm 10.9.8.
+Verified on 2026-08-21 locally and in GitHub Actions with Node.js 22 and 24.
 
 ## Published packages
 
@@ -43,11 +43,14 @@ npm run smoke:loader
 
 `smoke:loader` builds a tarball, creates an isolated `DSH_HOME`, installs the absolute tarball via `dsh plugin --profile smoke add`, checks that the resulting profile bundle list contains `dsh-snapshot`, and boots the real headless profile with a non-interactive task argument. During this dedicated smoke invocation, `apply` writes a one-time marker and exits successfully; the script fails unless that runtime marker is present. This proves the installed bundle's `apply` executed, rather than merely parsing YAML or displaying CLI help. It uses argument arrays, a 60-second timeout per child process, and always deletes its temporary directory.
 
-## Verification status in this workspace
+## Verification status
 
-The public import probe completed successfully before the dependency installation was interrupted: `defineTool verified`.
-
-The full `npm install`, `npm run build`, `npm pack`, and loader smoke remain **unverified in this workspace**. This execution environment terminated the installation before it created `node_modules/.bin/tsc`; the subsequent build failed with `sh: tsc: command not found`, and the partial install was later removed. The committed lockfile remains reproducible, and the commands above are the required release gate on a machine where installation can complete.
+A clean local `npm ci`, TypeScript 6 build, 98-test suite, pack inspection,
+and real packed-loader smoke all passed. The same clean-install gates passed in
+[GitHub Actions](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389095727)
+on Ubuntu, macOS, and Windows with Node.js 22 and 24. The packed-loader job
+installed the generated tarball into an isolated real DSH rc.6 Profile and
+observed the plugin's runtime marker.
 
 ## Deviation from source snapshot `141eb6f...`
 
