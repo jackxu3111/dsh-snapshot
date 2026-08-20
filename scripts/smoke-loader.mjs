@@ -11,6 +11,7 @@ const dshPackage = require.resolve('@deepseek-ai/dsh/package.json')
 const dshBin = join(dshPackage, '..', 'lib', 'bin.js')
 const smokeRoot = mkdtempSync(join(tmpdir(), 'dsh-snapshot-loader-'))
 const dshHome = join(smokeRoot, 'home')
+const applyMarker = join(smokeRoot, 'apply.marker')
 let tarball
 
 function run(command, args, options = {}) {
@@ -37,8 +38,14 @@ try {
     throw new Error('installed profile does not reference dsh-snapshot as a bundle')
   }
 
-  run(process.execPath, [dshBin, '--profile', 'smoke', '--help'])
-  console.log('loader smoke verified')
+  run(process.execPath, [dshBin, '--profile', 'smoke', 'loader smoke'], {
+    env: { DSH_SNAPSHOT_SMOKE_MARKER: applyMarker },
+  })
+  if (readFileSync(applyMarker, 'utf8') !== 'dsh-snapshot apply\n') {
+    throw new Error('DSH boot completed without applying dsh-snapshot')
+  }
+
+  console.log('loader smoke verified: dsh-snapshot apply ran during profile boot')
 } finally {
   if (tarball) rmSync(tarball, { force: true })
   rmSync(smokeRoot, { recursive: true, force: true })

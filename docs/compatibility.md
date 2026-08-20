@@ -41,7 +41,7 @@ node --input-type=module -e "import('@deepseek-ai/dsh-tools').then(m=>{if(typeof
 npm run smoke:loader
 ```
 
-`smoke:loader` builds a tarball, creates an isolated `DSH_HOME`, installs the absolute tarball via `dsh plugin --profile smoke add`, checks that the resulting profile bundle list contains `dsh-snapshot`, and starts the real DSH profile loader with `--help`. It uses argument arrays, a 60-second timeout per child process, and always deletes its temporary directory.
+`smoke:loader` builds a tarball, creates an isolated `DSH_HOME`, installs the absolute tarball via `dsh plugin --profile smoke add`, checks that the resulting profile bundle list contains `dsh-snapshot`, and boots the real headless profile with a non-interactive task argument. During this dedicated smoke invocation, `apply` writes a one-time marker and exits successfully; the script fails unless that runtime marker is present. This proves the installed bundle's `apply` executed, rather than merely parsing YAML or displaying CLI help. It uses argument arrays, a 60-second timeout per child process, and always deletes its temporary directory.
 
 ## Verification status in this workspace
 
