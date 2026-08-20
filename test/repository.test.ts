@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import test from 'node:test'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { SnapshotError } from '../src/errors.ts'
+import { nodeFileSystem } from '../src/filesystem.ts'
+import type { FileSystem } from '../src/filesystem.ts'
 import { snapshotDirectory, snapshotRoot } from '../src/policy.ts'
 import { SnapshotRepository, sha256 } from '../src/repository.ts'
 import type { LogicalPath, Manifest, ManifestEntry } from '../src/types.ts'
@@ -55,6 +57,43 @@ async function withHome<T>(operation: (home: string) => Promise<T>): Promise<T> 
   } finally {
     await rm(home, { recursive: true, force: true })
   }
+}
+
+function recordingFileSystem(failWritePath?: string) {
+  const calls: string[] = []
+  const fs = {
+    ...nodeFileSystem,
+    writeFile: async (path: unknown, data: unknown, options: unknown) => {
+      calls.push(`write:${String(path)}`)
+      if (failWritePath !== undefined && String(path).endsWith(failWritePath)) {
+        throw Object.assign(new Error('injected write failure'), { code: 'EIO' })
+      }
+      return (nodeFileSystem.writeFile as unknown as (...args: unknown[]) => Promise<void>)(path, data, options)
+    },
+    open: async (path: unknown, ...options: unknown[]) => {
+      calls.push(`open:${String(path)}`)
+      const handle = await (nodeFileSystem.open as unknown as (...args: unknown[]) => Promise<unknown>)(
+        path,
+        ...options,
+      )
+      return {
+        sync: async () => {
+          calls.push(`sync:${String(path)}`)
+          return (handle as { sync: () => Promise<void> }).sync()
+        },
+        close: async () => (handle as { close: () => Promise<void> }).close(),
+      }
+    },
+    rename: async (from: unknown, to: unknown) => {
+      calls.push(`rename:${String(from)}:${String(to)}`)
+      return nodeFileSystem.rename(from as string, to as string)
+    },
+    rm: async (path: unknown, options: unknown) => {
+      calls.push(`rm:${String(path)}`)
+      return nodeFileSystem.rm(path as string, options as { recursive: boolean; force: boolean })
+    },
+  } as unknown as FileSystem
+  return { fs, calls }
 }
 
 test('sha256 returns the lowercase SHA-256 digest of bytes', () => {
@@ -151,6 +190,20 @@ test('readManifest rejects unknown top-level fields, mismatched IDs and invalid 
   })
 })
 
+test('readManifest rejects a manifest symlink instead of following it', async () => {
+  await withHome(async (home) => {
+    const repository = new SnapshotRepository({ dshHome: home })
+    const directory = snapshotDirectory(home, snapshotId)
+    await seedManifest(home, snapshotId, manifestFor())
+    const regularManifest = join(directory, 'regular-manifest.json')
+    await writeFile(regularManifest, JSON.stringify(manifestFor()), 'utf8')
+    await rm(join(directory, 'manifest.json'))
+    await symlink(regularManifest, join(directory, 'manifest.json'))
+
+    await assert.rejects(repository.readManifest(snapshotId), SnapshotError)
+  })
+})
+
 test('publish writes payloads before a LF manifest with restrictive modes', async () => {
   await withHome(async (home) => {
     const repository = new SnapshotRepository({
@@ -165,7 +218,7 @@ test('publish writes payloads before a LF manifest with restrictive modes', asyn
     assert.equal(manifestText.endsWith('\n'), true)
     assert.equal(manifestText.includes('\r'), false)
     assert.equal(manifestText.includes(home), false)
-    assert.equal(manifestText.includes('settings'), false)
+    assert.equal(manifestText.includes('home patch'), false)
 
     const rootMode = (await stat(snapshotRoot(home))).mode & 0o777
     const directoryMode = (await stat(directory)).mode & 0o777
@@ -196,16 +249,52 @@ test('preflight rehashes every present payload and rejects tampering', async () 
   })
 })
 
+test('publish syncs payloads before the manifest and performs one final rename', async () => {
+  await withHome(async (home) => {
+    const recording = recordingFileSystem()
+    const repository = new SnapshotRepository({ dshHome: home, fs: recording.fs, randomHex: () => 'a1b2c3' })
+    await repository.publish(manifestFor(), payloads)
+
+    const writes = recording.calls.filter((call) => call.startsWith('write:'))
+    assert.equal(writes.at(-1)?.endsWith('/manifest.json'), true)
+    assert.equal(recording.calls.filter((call) => call.startsWith('sync:')).length, 7)
+    assert.equal(recording.calls.filter((call) => call.startsWith('rename:')).length, 1)
+  })
+})
+
+test('publish cleans its temporary sibling after a write failure', async () => {
+  await withHome(async (home) => {
+    const recording = recordingFileSystem('entry-2.bin')
+    const repository = new SnapshotRepository({ dshHome: home, fs: recording.fs, randomHex: () => 'a1b2c3' })
+
+    await assert.rejects(repository.publish(manifestFor(), payloads), SnapshotError)
+    assert.equal((await repository.list()).length, 0)
+    assert.equal(recording.calls.some((call) => call.startsWith('rm:') && call.includes('.tmp-a1b2c3')), true)
+  })
+})
+
+test('publish refuses to replace an immutable existing snapshot ID', async () => {
+  await withHome(async (home) => {
+    const repository = new SnapshotRepository({ dshHome: home, randomHex: () => 'a1b2c3' })
+    await repository.publish(manifestFor(), payloads)
+    await assert.rejects(repository.publish(manifestFor(), payloads), SnapshotError)
+    assert.equal((await repository.list()).length, 1)
+  })
+})
+
 test('list is shallow, isolates corrupt siblings, filters profile and ignores temporary directories', async () => {
   await withHome(async (home) => {
     const repository = new SnapshotRepository({ dshHome: home, randomHex: () => 'a1b2c3' })
     await repository.publish(manifestFor(snapshotId), payloads)
 
     const secondId = '20260819T104530123Z-a1b2c3'
+    const secondManifest = manifestFor(secondId, ['profile/package.json'])
+    secondManifest.createdAt = '2026-08-19T10:45:30.123Z'
     await repository.publish(
-      manifestFor(secondId, ['profile/package.json']),
+      secondManifest,
       new Map([['profile/package.json', payloads.get('profile/package.json') as Buffer]]),
     )
+    await rm(join(snapshotDirectory(home, secondId), 'files', 'entry-2.bin'))
 
     const corruptId = '20260818T104530123Z-a1b2c3'
     await seedManifest(home, corruptId, { nope: true })
@@ -213,17 +302,24 @@ test('list is shallow, isolates corrupt siblings, filters profile and ignores te
     await import('node:fs/promises').then(({ mkdir }) => mkdir(temporary, { recursive: true }))
     await writeFile(join(temporary, 'manifest.json'), JSON.stringify(manifestFor(corruptId)), 'utf8')
 
-    const rows = await repository.list()
+    const shallowFs = {
+      ...nodeFileSystem,
+      readFile: async (path: unknown, ...options: unknown[]) => {
+        assert.equal(String(path).includes('/files/'), false)
+        return (nodeFileSystem.readFile as unknown as (...args: unknown[]) => Promise<unknown>)(path, ...options)
+      },
+    } as unknown as FileSystem
+    const shallowRepository = new SnapshotRepository({ dshHome: home, fs: shallowFs })
+    const rows = await shallowRepository.list()
     assert.equal(rows.length, 3)
     assert.equal(rows[0]?.snapshotId, snapshotId)
     assert.equal(rows[0]?.status, 'available')
-    assert.equal(rows[1]?.snapshotId, secondId)
-    assert.equal(rows[1]?.status, 'corrupt')
-    assert.equal(rows[2]?.snapshotId, corruptId)
+    assert.equal(rows[1]?.snapshotId, corruptId)
     assert.equal(rows[2]?.status, 'corrupt')
+    assert.equal(rows[2]?.snapshotId, secondId)
 
     const filtered = await repository.list('work')
-    assert.equal(filtered.length, 3)
+    assert.equal(filtered.length, 2)
     assert.equal((await repository.list('other')).length, 0)
   })
 })

@@ -106,14 +106,15 @@ function assertCanonicalTimestamp(value: unknown): asserts value is string {
   assertManifest(typeof value === 'string')
   const date = new Date(value)
   assertManifest(
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value) &&
       !Number.isNaN(date.getTime()) &&
-      date.toISOString() === value,
+      (date.toISOString() === value || date.toISOString().replace('.000Z', 'Z') === value),
   )
 }
 
 function assertSafeStoredName(value: unknown): asserts value is string {
   assertManifest(typeof value === 'string')
+  const windowsReservedName = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.[^.]*)?$/i
   assertManifest(
     value !== '.' &&
       value !== '..' &&
@@ -122,6 +123,7 @@ function assertSafeStoredName(value: unknown): asserts value is string {
       !value.includes('/') &&
       !value.includes('\\') &&
       !/[ .]$/.test(value) &&
+      !windowsReservedName.test(value) &&
       STORED_NAME_PATTERN.test(value),
   )
 }
@@ -237,7 +239,12 @@ export function sha256(bytes: Buffer): string {
 
 function toDate(value: PrimitiveDate | (() => PrimitiveDate) | undefined): Date {
   const selected = typeof value === 'function' ? value() : value
-  const date = selected === undefined ? new Date() : new Date(selected)
+  const date =
+    selected === undefined
+      ? new Date()
+      : selected instanceof Date
+        ? new Date(selected.getTime())
+        : new Date(selected)
   if (Number.isNaN(date.getTime())) throw new TypeError('Invalid repository clock')
   return date
 }
@@ -261,7 +268,7 @@ function toBuffer(value: unknown): Buffer {
 
 function payloadEntries(payloads: SnapshotPayloads): Array<readonly [string, Buffer]> {
   if (payloads instanceof Map) {
-    return [...payloads.entries()].map(([key, value]) => [key, toBuffer(value)])
+    return [...payloads.entries()].map(([key, value]) => [key, toBuffer(value)] as const)
   }
   if (Array.isArray(payloads)) {
     return payloads.map((entry) => {
@@ -289,6 +296,14 @@ function isRegularFile(stat: unknown): boolean {
   return typeof stat.mode === 'number' && (stat.mode & 0o170000) === 0o100000
 }
 
+function payloadMismatch(cause?: unknown): SnapshotError {
+  return new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot payloads do not match the manifest', { cause })
+}
+
+function payloadPath(snapshotPath: string, entry: PresentManifestEntry): string {
+  return join(snapshotPath, 'files', entry.storedName)
+}
+
 export class SnapshotRepository {
   readonly #dshHome: string
   readonly #fs: FileSystem
@@ -309,7 +324,18 @@ export class SnapshotRepository {
   async readManifest(snapshotId: string): Promise<Manifest> {
     validateSnapshotId(snapshotId)
     const manifestPath = join(snapshotDirectory(this.#dshHome, snapshotId), 'manifest.json')
-    let raw: string | Buffer
+    try {
+      const metadata = await this.#fs.lstat(manifestPath)
+      if (!isRegularFile(metadata)) throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot manifest is not a regular file')
+    } catch (error) {
+      if (error instanceof SnapshotError) throw error
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        throw new SnapshotError('SNAPSHOT_NOT_FOUND', 'Snapshot manifest was not found', { cause: error })
+      }
+      throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot manifest could not be read', { cause: error })
+    }
+
+    let raw: unknown
     try {
       raw = await this.#fs.readFile(manifestPath, 'utf8')
     } catch (error) {
@@ -321,22 +347,267 @@ export class SnapshotRepository {
 
     let value: unknown
     try {
-      value = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf8'))
+      const text = typeof raw === 'string' ? raw : Buffer.from(raw as Uint8Array).toString('utf8')
+      value = JSON.parse(text)
     } catch (error) {
       throw invalidManifest(error)
     }
     return validateManifest(value, snapshotId)
   }
 
-  async publish(_manifest: Manifest, _payloads: SnapshotPayloads): Promise<void> {
-    throw new Error('Not implemented')
+  async publish(manifestValue: Manifest, payloadCollection: SnapshotPayloads): Promise<void> {
+    let manifest: Manifest
+    try {
+      manifest = validateManifest(manifestValue)
+    } catch (error) {
+      if (error instanceof SnapshotError) throw error
+      throw payloadMismatch(error)
+    }
+
+    const presentEntries = manifest.entries.filter(
+      (entry): entry is PresentManifestEntry => entry.status === 'present',
+    )
+    const payloadByLogicalPath = new Map<LogicalPath, Buffer>()
+    try {
+      const entriesByLogicalPath = new Map<string, ManifestEntry>(
+        manifest.entries.map((entry) => [entry.logicalPath, entry]),
+      )
+      const entriesByStoredName = new Map(presentEntries.map((entry) => [entry.storedName, entry]))
+
+      for (const [key, payload] of payloadEntries(payloadCollection)) {
+        const logicalEntry = entriesByLogicalPath.get(key)
+        const storedEntry = entriesByStoredName.get(key)
+        const entry = logicalEntry ?? storedEntry
+        if (!entry || entry.status !== 'present' || (logicalEntry && storedEntry && logicalEntry !== storedEntry)) {
+          throw payloadMismatch()
+        }
+        if (payloadByLogicalPath.has(entry.logicalPath)) throw payloadMismatch()
+        if (payload.byteLength !== entry.bytes || sha256(payload) !== entry.sha256) {
+          throw payloadMismatch()
+        }
+        payloadByLogicalPath.set(entry.logicalPath, payload)
+      }
+
+      if (payloadByLogicalPath.size !== presentEntries.length) throw payloadMismatch()
+    } catch (error) {
+      if (error instanceof SnapshotError) throw error
+      throw payloadMismatch(error)
+    }
+
+    const root = snapshotRoot(this.#dshHome)
+    const finalDirectory = snapshotDirectory(this.#dshHome, manifest.snapshotId)
+    let temporaryDirectory: string | undefined
+
+    try {
+      await this.#fs.mkdir(root, { recursive: true, mode: 0o700 })
+      await this.#fs.chmod(root, 0o700)
+      try {
+        await this.#fs.lstat(finalDirectory)
+        throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot id already exists')
+      } catch (error) {
+        if (error instanceof SnapshotError) throw error
+        if (!isNodeError(error) || error.code !== 'ENOENT') {
+          throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot destination is unavailable', { cause: error })
+        }
+      }
+
+      temporaryDirectory = join(root, `.tmp-${selectRandomHex(this.#randomHex)}`)
+      await this.#fs.mkdir(temporaryDirectory, { mode: 0o700 })
+      await this.#fs.chmod(temporaryDirectory, 0o700)
+      const filesDirectory = join(temporaryDirectory, 'files')
+      await this.#fs.mkdir(filesDirectory, { mode: 0o700 })
+      await this.#fs.chmod(filesDirectory, 0o700)
+
+      for (const entry of presentEntries) {
+        const target = payloadPath(temporaryDirectory, entry)
+        await this.#fs.writeFile(target, payloadByLogicalPath.get(entry.logicalPath) as Buffer, {
+          flag: 'wx',
+          mode: 0o600,
+        })
+        await this.#fs.chmod(target, 0o600)
+        await this.syncFile(target)
+      }
+
+      const manifestPath = join(temporaryDirectory, 'manifest.json')
+      const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`, 'utf8')
+      await this.#fs.writeFile(manifestPath, manifestBytes, { flag: 'wx', mode: 0o600 })
+      await this.#fs.chmod(manifestPath, 0o600)
+      await this.syncFile(manifestPath)
+
+      await this.#fs.rename(temporaryDirectory, finalDirectory)
+      temporaryDirectory = undefined
+    } catch (error) {
+      if (temporaryDirectory !== undefined) {
+        try {
+          await this.#fs.rm(temporaryDirectory, { recursive: true, force: true })
+        } catch {
+          // Preserve the publication error. Operators can inspect the private cause.
+        }
+      }
+      if (error instanceof SnapshotError) throw error
+      throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot publication failed', { cause: error })
+    }
   }
 
-  async preflight(_snapshotId: string): Promise<Manifest> {
-    throw new Error('Not implemented')
+  async preflight(snapshotId: string): Promise<Manifest> {
+    const manifest = await this.readManifest(snapshotId)
+    const directory = snapshotDirectory(this.#dshHome, snapshotId)
+
+    for (const entry of manifest.entries) {
+      if (entry.status !== 'present') continue
+      const target = payloadPath(directory, entry)
+      let metadata: unknown
+      try {
+        metadata = await this.#fs.lstat(target)
+      } catch (error) {
+        throw payloadMismatch(error)
+      }
+      if (!isRegularFile(metadata)) throw payloadMismatch()
+      const size = isRecord(metadata) ? metadata.size : undefined
+      if (typeof size !== 'number' || size !== entry.bytes) throw payloadMismatch()
+
+      let raw: string | Buffer
+      try {
+        raw = await this.#fs.readFile(target)
+      } catch (error) {
+        throw payloadMismatch(error)
+      }
+      const bytes = typeof raw === 'string' ? Buffer.from(raw, 'utf8') : Buffer.from(raw)
+      if (bytes.byteLength !== entry.bytes || sha256(bytes) !== entry.sha256) throw payloadMismatch()
+    }
+
+    return manifest
   }
 
   async list(_profile?: string): Promise<SnapshotSummary[]> {
-    throw new Error('Not implemented')
+    const profile = _profile === undefined ? undefined : validateProfile(_profile)
+    const root = snapshotRoot(this.#dshHome)
+    let rawEntries: unknown[]
+    try {
+      rawEntries = (await this.#fs.readdir(root, { withFileTypes: true })) as unknown[]
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') return []
+      throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot directory could not be listed', { cause: error })
+    }
+
+    const summaries: SnapshotSummary[] = []
+    for (const rawEntry of rawEntries) {
+      const name = entryName(rawEntry)
+      if (name === undefined || name.startsWith('.tmp-') || !SNAPSHOT_DIRECTORY_PATTERN.test(name)) continue
+      if (!entryMayBeDirectory(rawEntry)) continue
+
+      const directory = snapshotDirectory(this.#dshHome, name)
+      if (typeof rawEntry === 'string') {
+        let metadata: unknown
+        try {
+          metadata = await this.#fs.lstat(directory)
+        } catch {
+          continue
+        }
+        if (!isDirectory(metadata)) continue
+      }
+
+      let manifest: Manifest
+      try {
+        manifest = await this.readManifest(name)
+      } catch {
+        if (profile !== undefined) continue
+        summaries.push(corruptSummary(name))
+        continue
+      }
+
+      if (profile !== undefined && manifest.profile !== profile) continue
+      let available = true
+      for (const entry of manifest.entries) {
+        if (entry.status !== 'present') continue
+        try {
+          const metadata = await this.#fs.lstat(payloadPath(directory, entry))
+          if (!isRegularFile(metadata) || !isRecord(metadata) || metadata.size !== entry.bytes) {
+            available = false
+            break
+          }
+        } catch {
+          available = false
+          break
+        }
+      }
+
+      const presentEntries = manifest.entries.filter(
+        (entry): entry is PresentManifestEntry => entry.status === 'present',
+      )
+      const summary: SnapshotSummary = {
+        snapshotId: manifest.snapshotId,
+        createdAt: manifest.createdAt,
+        profile: manifest.profile,
+        kind: manifest.kind,
+        pluginVersion: manifest.pluginVersion,
+        fileCount: presentEntries.length,
+        totalBytes: presentEntries.reduce((total, entry) => total + entry.bytes, 0),
+        status: available ? 'available' : 'corrupt',
+      }
+      if (manifest.label !== undefined) summary.label = manifest.label
+      summaries.push(summary)
+    }
+
+    summaries.sort(compareSummaries)
+    return summaries
   }
+
+  private async syncFile(path: string): Promise<void> {
+    const handle = await this.#fs.open(path, 'r')
+    try {
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+  }
+}
+
+function entryName(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  if (isRecord(value) && typeof value.name === 'string') return value.name
+  return undefined
+}
+
+function entryMayBeDirectory(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.isDirectory !== 'function') return true
+  try {
+    return value.isDirectory() as boolean
+  } catch {
+    return false
+  }
+}
+
+function isDirectory(stat: unknown): boolean {
+  if (!isRecord(stat)) return false
+  if (typeof stat.isDirectory === 'function') {
+    try {
+      return stat.isDirectory() as boolean
+    } catch {
+      return false
+    }
+  }
+  return typeof stat.mode === 'number' && (stat.mode & 0o170000) === 0o040000
+}
+
+function corruptSummary(snapshotId: string): SnapshotSummary {
+  return {
+    snapshotId,
+    createdAt: '',
+    profile: '',
+    kind: 'normal',
+    pluginVersion: '',
+    fileCount: 0,
+    totalBytes: 0,
+    status: 'corrupt',
+  }
+}
+
+function compareSummaries(left: SnapshotSummary, right: SnapshotSummary): number {
+  if (left.status !== right.status) return left.status === 'available' ? -1 : 1
+  if (left.status === 'available') {
+    const byCreatedAt = right.createdAt.localeCompare(left.createdAt)
+    if (byCreatedAt !== 0) return byCreatedAt
+  }
+  return left.snapshotId.localeCompare(right.snapshotId)
 }
