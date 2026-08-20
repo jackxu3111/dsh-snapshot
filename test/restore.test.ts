@@ -6,7 +6,7 @@ import { CaptureService } from '../src/capture.ts'
 import { SnapshotError } from '../src/errors.ts'
 import { nodeFileSystem } from '../src/filesystem.ts'
 import { WriterLock } from '../src/lock.ts'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { profileRoot, resolveWhitelist } from '../src/policy.ts'
 import { SnapshotRepository } from '../src/repository.ts'
@@ -198,5 +198,50 @@ test('POSIX restore syncs the target directory after rename commits', async () =
     })
     await restore.restore(snapshot.snapshotId)
     assert.ok(injected.calls.some((call) => call.method === 'sync' && call.path === dirname(target)))
+  })
+})
+
+test('does not remove a pre-existing sibling stage when exclusive creation collides', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seed(home, { 'home/settings.yaml': Buffer.from('snapshot') })
+    const plain = services(home)
+    const snapshot = await plain.capture.capture({ profile: 'work' })
+    const target = resolveWhitelist(home, 'work').get('home/settings.yaml')!
+    const oldStage = join(dirname(target), '.settings.yaml.dsh-stage-abcdef')
+    await writeFile(oldStage, 'do not delete')
+    const restore = new RestoreService({
+      dshHome: home, repository: plain.repository, capture: plain.capture, writerLock: immediateWriterLock(), randomHex: () => 'abcdef',
+    })
+    await assert.rejects(restore.restore(snapshot.snapshotId))
+    assert.equal(String(await readFile(oldStage)), 'do not delete')
+  })
+})
+
+test('does not offer dependency installation when package and lock entries remain absent', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seed(home, { 'home/settings.yaml': Buffer.from('snapshot') })
+    const plain = services(home)
+    const snapshot = await plain.capture.capture({ profile: 'work' })
+    await seed(home, { 'home/settings.yaml': Buffer.from('original') })
+    const result = await plain.restore.restore(snapshot.snapshotId)
+    assert.equal(result.dependencyInstallCommand, undefined)
+  })
+})
+
+test('does not overwrite a pre-existing sibling backup when its name collides', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seed(home, { 'home/settings.yaml': Buffer.from('snapshot') })
+    const plain = services(home)
+    const snapshot = await plain.capture.capture({ profile: 'work' })
+    await seed(home, { 'home/settings.yaml': Buffer.from('original') })
+    const target = resolveWhitelist(home, 'work').get('home/settings.yaml')!
+    const oldBackup = `${target}.dsh-backup-abcdef`
+    await writeFile(oldBackup, 'do not overwrite')
+    const restore = new RestoreService({
+      dshHome: home, repository: plain.repository, capture: plain.capture, writerLock: immediateWriterLock(), randomHex: () => 'abcdef',
+    })
+    await assert.rejects(restore.restore(snapshot.snapshotId))
+    assert.equal(String(await readFile(oldBackup)), 'do not overwrite')
+    assert.equal(String(await readFile(target)), 'original')
   })
 })
