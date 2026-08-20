@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cross-platform:
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        node-version:
+          - '22.x'
+          - '24.x'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Check formatting
+        run: npm run format:check
+      - name: Build
+        run: npm run build
+
+  package-and-loader-smoke:
+    name: Ubuntu package and real loader smoke
+    needs: cross-platform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+      - name: Set up pnpm for the DSH plugin forwarder
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Install dependencies
+        run: npm ci
+      - name: Inspect package contents
+        run: npm pack --dry-run
+      - name: Run the real packed-plugin loader smoke
+        run: npm run smoke:loader

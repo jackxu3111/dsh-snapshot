@@ -1,6 +1,10 @@
+.superpowers/
 node_modules/
 dist/
 coverage/
+*.tgz
+*.tar.gz
+.dsh/
 .DS_Store
 .env
 .env.*

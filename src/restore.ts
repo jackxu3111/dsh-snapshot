@@ -264,7 +264,9 @@ export class RestoreService {
       restored,
       removed,
       restartRequired: true,
-      ...(dependenciesChanged ? { dependencyInstallCommand: 'pnpm install --frozen-lockfile' } : {}),
+      ...(dependenciesChanged
+        ? { dependencyInstallCommand: `dsh plugin --profile ${manifest.profile} install --frozen-lockfile` }
+        : {}),
     }
   }
 

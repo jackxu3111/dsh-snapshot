@@ -63,7 +63,7 @@ test('restore captures protection under one writer lock then restores present an
     assert.deepEqual(result.restored, ['home/settings.yaml', 'profile/package.json'])
     assert.deepEqual(result.removed, ['home/cordis.patch.yml'])
     assert.equal(result.restartRequired, true)
-    assert.equal(result.dependencyInstallCommand, 'pnpm install --frozen-lockfile')
+    assert.equal(result.dependencyInstallCommand, 'dsh plugin --profile work install --frozen-lockfile')
     assert.match(result.protectionSnapshotId, /^\d{8}T\d{9}Z-[0-9a-f]{6}$/)
     assert.equal(String(await readFile(resolveWhitelist(home, 'work').get('home/settings.yaml')!)), 'snapshot settings')
     await assert.rejects(readFile(resolveWhitelist(home, 'work').get('home/cordis.patch.yml')!), { code: 'ENOENT' })
