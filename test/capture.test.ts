@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { chmod, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import test from 'node:test'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { SnapshotError } from '../src/errors.ts'
 import { nodeFileSystem } from '../src/filesystem.ts'
@@ -11,6 +11,7 @@ import { SnapshotRepository, sha256 } from '../src/repository.ts'
 import { MAX_FILE_BYTES, MAX_SNAPSHOT_BYTES } from '../src/types.ts'
 import type { LogicalPath } from '../src/types.ts'
 import { CaptureService } from '../src/capture.ts'
+import { WriterLock } from '../src/lock.ts'
 import {
   allLogicalPaths,
   immediateWriterLock,
@@ -193,6 +194,91 @@ test('captureUnlocked publishes without acquiring the writer lock', async () => 
     const manifest = await repository.readManifest(result.snapshotId)
     assert.equal(manifest.kind, 'protection')
     assert.equal(manifest.label, 'Before restore')
+  })
+})
+
+test('captureUnlocked can publish a restore-style protection snapshot while the writer lock is held', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, {})
+    const repository = makeRepository(home)
+    const writerLock = new WriterLock({ root: home })
+    const capture = new CaptureService({
+      dshHome: home,
+      repository,
+      now: fixedDate,
+      pluginVersion: '1.2.3',
+      dshVersion: '4.5.6',
+      writerLock,
+    })
+
+    const result = await writerLock.runExclusive(() =>
+      capture.captureUnlocked({ profile: 'work', kind: 'protection', label: 'Before restore' }),
+    )
+
+    assert.equal((await repository.readManifest(result.snapshotId)).kind, 'protection')
+  })
+})
+
+test('independent capture writers hold the lock from repository precheck through final rename', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, { 'home/settings.yaml': Buffer.from('settings\n') })
+    let releaseRename!: () => void
+    const renameMayFinish = new Promise<void>((resolve) => {
+      releaseRename = resolve
+    })
+    let signalRename!: () => void
+    const finalRenameReached = new Promise<void>((resolve) => {
+      signalRename = resolve
+    })
+    let paused = false
+    const fs = {
+      ...nodeFileSystem,
+      rename: async (from: string, to: string) => {
+        if (!paused && basename(from).startsWith('.tmp-') && to.startsWith(snapshotRoot(home))) {
+          paused = true
+          signalRename()
+          await renameMayFinish
+        }
+        return nodeFileSystem.rename(from, to)
+      },
+    } as unknown as FileSystem
+    const firstRepository = new SnapshotRepository({
+      dshHome: home,
+      now: fixedDate,
+      randomHex: 'a1b2c3',
+      fs,
+    })
+    const secondRepository = new SnapshotRepository({
+      dshHome: home,
+      now: fixedDate,
+      randomHex: 'a1b2c3',
+    })
+    const firstCapture = new CaptureService({
+      dshHome: home,
+      repository: firstRepository,
+      fs,
+      now: fixedDate,
+      pluginVersion: '1.2.3',
+      writerLock: new WriterLock({ root: home, fs }),
+    })
+    const secondCapture = new CaptureService({
+      dshHome: home,
+      repository: secondRepository,
+      now: fixedDate,
+      pluginVersion: '1.2.3',
+      writerLock: new WriterLock({ root: home }),
+    })
+
+    const first = firstCapture.capture({ profile: 'work' })
+    await finalRenameReached
+    await assert.rejects(
+      secondCapture.capture({ profile: 'work' }),
+      (error: unknown) => error instanceof SnapshotError && error.code === 'BUSY',
+    )
+
+    releaseRename()
+    const result = await first
+    assert.equal((await firstRepository.readManifest(result.snapshotId)).snapshotId, result.snapshotId)
   })
 })
 

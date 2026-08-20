@@ -5,6 +5,7 @@ import { SnapshotError } from './errors.ts'
 import { nodeFileSystem } from './filesystem.ts'
 import type { FileSystem } from './filesystem.ts'
 import type { FileHandle } from './filesystem.ts'
+import type { WriterLockLike } from './lock.ts'
 import { profileRoot, resolveWhitelist, validateProfile } from './policy.ts'
 import { sha256 } from './repository.ts'
 import type { SnapshotPayloads } from './repository.ts'
@@ -60,10 +61,6 @@ interface StableFile {
   mode: number
 }
 
-export interface WriterLock {
-  runExclusive<T>(operation: () => Promise<T>): Promise<T>
-}
-
 export interface CaptureRepository {
   createId(): string
   publish(manifest: Manifest, payloads: SnapshotPayloads): Promise<void>
@@ -76,7 +73,7 @@ export interface CaptureServiceOptions {
   now?: CaptureClock
   pluginVersion: string
   dshVersion?: string
-  writerLock: WriterLock
+  writerLock: WriterLockLike
 }
 
 export interface CaptureInput {
@@ -353,7 +350,7 @@ export class CaptureService {
   readonly #now: CaptureClock | undefined
   readonly #pluginVersion: string
   readonly #dshVersion: string | undefined
-  readonly #writerLock: WriterLock
+  readonly #writerLock: WriterLockLike
 
   constructor(options: CaptureServiceOptions) {
     if (typeof options.pluginVersion !== 'string' || options.pluginVersion.length === 0) {
