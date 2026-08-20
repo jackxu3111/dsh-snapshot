@@ -2,9 +2,8 @@
 
 为 DeepSeek Harness（`dsh`）Profile 提供本地、可回滚的配置快照。
 
-> **发布状态：** 源代码和 `v0.1.0` 安装包通过
-> [GitHub Releases](https://github.com/jackxu3111/dsh-snapshot/releases/tag/v0.1.0)
-> 发布。npm 包仍明确设置为私有，未发布到 npm。
+> **发布状态：** `v0.1.0` 发布候选版已通过审核，但标签和安装包资产尚未发布。
+> npm 包仍明确设置为私有，未发布到 npm。
 
 ## 兼容性
 
@@ -22,14 +21,8 @@
 
 ## 安装、重启和卸载
 
-当前包未发布到 npm。可将已评审的 `v0.1.0` Release tarball 直接安装到
-已有 Profile，或让 DSH 初始化一个新的非默认 Profile：
-
-```sh
-dsh plugin --profile work add https://github.com/jackxu3111/dsh-snapshot/releases/download/v0.1.0/dsh-snapshot-0.1.0.tgz
-```
-
-如需从源码构建同样的包，可在仓库中生成本地 tarball，再传入它的绝对路径：
+当前包未发布到 npm。在已批准的 GitHub Release 资产正式发布前，请从本仓库
+生成本地 tarball，再把绝对路径添加到已有 Profile，或让 DSH 初始化新 Profile：
 
 ```sh
 npm ci
@@ -194,4 +187,4 @@ Bundle 的 `apply` 真正执行。它需要公开的 DSH 依赖，以及 PATH �
 发布证据记录在
 [`docs/release-checklist.md`](docs/release-checklist.md) 和已通过的
 [GitHub Actions](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389095727)。
-安装包只通过 GitHub Releases 发布，未发布到 npm。
+已批准的安装包将只通过 GitHub Releases 发布，不会发布到 npm。
