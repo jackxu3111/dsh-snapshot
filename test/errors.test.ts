@@ -31,6 +31,21 @@ test('toPublic exposes only the stable error code and message', () => {
   assert.equal('privatePath' in error.toPublic(), false)
 })
 
+test('JSON serialization excludes private diagnostics', () => {
+  const error = new SnapshotError('BUSY', 'Writer lock is held', {
+    cause: 'private-cause',
+    privatePath: '/secret',
+  })
+
+  const serialized = JSON.stringify(error)
+
+  assert.equal(serialized.includes('private-cause'), false)
+  assert.equal(serialized.includes('privatePath'), false)
+  assert.equal(serialized.includes('"cause"'), false)
+  assert.equal(error.diagnostics?.cause, 'private-cause')
+  assert.equal(error.diagnostics?.privatePath, '/secret')
+})
+
 test('SnapshotError accepts every stable error code', () => {
   assert.equal(allErrorCodes.length, 9)
 

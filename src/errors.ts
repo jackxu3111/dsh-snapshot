@@ -30,10 +30,24 @@ export class SnapshotError extends Error {
 
   constructor(code: SnapshotErrorCode, message: string, details?: SnapshotErrorDetails) {
     super(message)
-    this.name = 'SnapshotError'
+    Object.defineProperty(this, 'name', {
+      configurable: true,
+      enumerable: false,
+      value: 'SnapshotError',
+      writable: true,
+    })
     this.code = code
-    this.cause = details?.cause
     this.#details = details
+    Object.defineProperty(this, 'cause', {
+      configurable: false,
+      enumerable: false,
+      value: details?.cause,
+      writable: false,
+    })
+  }
+
+  get diagnostics(): Readonly<SnapshotErrorDetails> | undefined {
+    return this.#details
   }
 
   toPublic(): PublicSnapshotError {

@@ -39,7 +39,7 @@ export interface Manifest {
   createdAt: string
   profile: string
   kind: SnapshotKind
-  pluginVersion?: string
+  pluginVersion: string
   label?: string
   dshVersion?: string
   entries: ManifestEntry[]
