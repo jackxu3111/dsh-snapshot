@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   rename,
+  rmdir,
   rm,
   writeFile,
 } from 'node:fs/promises'
@@ -23,6 +24,7 @@ export interface FileSystem {
   writeFile: typeof writeFile
   mkdir: typeof mkdir
   rename: typeof rename
+  rmdir: typeof rmdir
   rm: typeof rm
   readdir: typeof readdir
   chmod: typeof chmod
@@ -36,6 +38,7 @@ export const nodeFileSystem: FileSystem = {
   writeFile,
   mkdir,
   rename,
+  rmdir,
   rm,
   readdir,
   chmod,

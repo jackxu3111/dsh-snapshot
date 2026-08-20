@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
 import { SnapshotError } from './errors.ts'
@@ -15,7 +16,14 @@ interface LockIdentity {
 
 interface OwnedLock {
   identity: LockIdentity
+  owner: LockOwner
   path: string
+}
+
+interface LockOwner {
+  acquiredAt: string
+  pid: number
+  token: string
 }
 
 export interface WriterLockLike {
@@ -57,8 +65,22 @@ function releaseFailure(error: unknown): SnapshotError {
   return new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot writer lock could not be released', { cause: error })
 }
 
+function recoveryRequired(error: unknown, root: string): SnapshotError {
+  return new SnapshotError(
+    'SNAPSHOT_CORRUPT',
+    'Snapshot writer lock may require operator recovery before another snapshot can run',
+    { cause: error, recovery: lockRecoveryMessage(root) },
+  )
+}
+
 function sameLock(left: LockIdentity, right: LockIdentity): boolean {
   return left.dev !== undefined && left.ino !== undefined && left.dev === right.dev && left.ino === right.ino
+}
+
+function ownerToken(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || !('token' in value)) return undefined
+  const token = value.token
+  return typeof token === 'string' ? token : undefined
 }
 
 /** Instructions intended for an operator after verifying the owner is no longer running. */
@@ -127,32 +149,60 @@ export class WriterLock implements WriterLockLike {
     let ownedLock: OwnedLock | undefined
     try {
       const identity = await this.#fs.lstat(lockPath)
-      ownedLock = { identity, path: lockPath }
-      const owner = JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() })
+      const owner: LockOwner = { pid: process.pid, acquiredAt: new Date().toISOString(), token: randomUUID() }
+      ownedLock = { identity, owner, path: lockPath }
       const ownerPath = join(lockPath, 'owner.json')
-      await this.#fs.writeFile(ownerPath, owner, { flag: 'wx', mode: 0o600 })
+      await this.#fs.writeFile(ownerPath, JSON.stringify(owner), { flag: 'wx', mode: 0o600 })
       await this.#fs.chmod(ownerPath, 0o600)
       return ownedLock
     } catch (error) {
-      if (ownedLock !== undefined) {
-        try {
-          await this.#release(ownedLock)
-        } catch {
-          // The original acquisition failure is the actionable result.
-        }
-      }
-      throw lockFailure(error)
+      if (await this.#removeEmptyLock(lockPath)) throw lockFailure(error)
+      throw recoveryRequired(error, this.#root)
     }
   }
 
   async #release(ownedLock: OwnedLock): Promise<void> {
     try {
       const current = await this.#fs.lstat(ownedLock.path)
-      if (!sameLock(ownedLock.identity, current)) return
-      await this.#fs.rm(ownedLock.path, { recursive: true, force: false })
+      if (!sameLock(ownedLock.identity, current)) throw recoveryRequired(undefined, this.#root)
     } catch (error) {
       if (isNodeError(error) && error.code === 'ENOENT') return
+      if (error instanceof SnapshotError) throw error
       throw releaseFailure(error)
+    }
+
+    const ownerPath = join(ownedLock.path, 'owner.json')
+    try {
+      const currentOwner = JSON.parse(String(await this.#fs.readFile(ownerPath, 'utf8'))) as unknown
+      if (ownerToken(currentOwner) !== ownedLock.owner.token) throw recoveryRequired(undefined, this.#root)
+    } catch (error) {
+      if (error instanceof SnapshotError) throw error
+      throw recoveryRequired(error, this.#root)
+    }
+
+    // Node has no atomic checked-path delete. Cooperative writers leave this
+    // directory untouched; nonrecursive cleanup fails closed if it changes.
+    try {
+      await this.#fs.rm(ownerPath, { recursive: false, force: false })
+    } catch (error) {
+      throw recoveryRequired(error, this.#root)
+    }
+
+    try {
+      await this.#fs.rmdir(ownedLock.path)
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') return
+      if (isNodeError(error) && error.code === 'ENOTEMPTY') throw recoveryRequired(error, this.#root)
+      throw releaseFailure(error)
+    }
+  }
+
+  async #removeEmptyLock(lockPath: string): Promise<boolean> {
+    try {
+      await this.#fs.rmdir(lockPath)
+      return true
+    } catch (error) {
+      return isNodeError(error) && error.code === 'ENOENT'
     }
   }
 }
