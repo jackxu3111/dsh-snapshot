@@ -111,6 +111,14 @@ async function writeFixtureSet(home: string, files: Partial<FileFixtures>): Prom
   }
 }
 
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
 async function chmodFixtureSet(home: string, mode: number): Promise<void> {
   const targets = resolveWhitelist(home, profile)
   for (const logicalPath of allLogicalPaths) {
@@ -302,5 +310,58 @@ test('acceptance serializes concurrent writers, reports cross-process BUSY, and 
     const listedWithResidue = await services.repository.list(profile)
     assert.equal(listedWithResidue.every((entry) => /^[0-9]{8}T[0-9]{9}Z-[0-9a-f]{6}$/.test(entry.snapshotId)), true)
     assert.equal(listedWithResidue.some((entry) => entry.snapshotId.includes('residue')), false)
+  })
+})
+
+test('acceptance queues public capture and restore behind one shared lock in FIFO order', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, { 'home/settings.yaml': initialFiles['home/settings.yaml'] })
+    const services = createServices({ dshHome: home })
+    const targetSnapshot = await services.capture.capture({ profile, label: 'queued target' })
+    await writeFixtureSet(home, { 'home/settings.yaml': mutatedFiles['home/settings.yaml'] })
+
+    const holderEntered = deferred()
+    const releaseHolder = deferred()
+    const lockEntries: string[] = []
+    const originalRunExclusive = services.writerLock.runExclusive.bind(services.writerLock)
+    services.writerLock.runExclusive = async <T>(operation: () => Promise<T>): Promise<T> => {
+      return originalRunExclusive(async () => {
+        lockEntries.push('entered')
+        return operation()
+      })
+    }
+
+    const holder = services.writerLock.runExclusive(async () => {
+      holderEntered.resolve()
+      await releaseHolder.promise
+    })
+    await holderEntered.promise
+    lockEntries.length = 0
+
+    const completionOrder: string[] = []
+    const capturePromise = services.capture.capture({ profile, label: 'queued capture' }).then((result) => {
+      completionOrder.push('capture')
+      return result
+    })
+    const restorePromise = services.restore.restore(targetSnapshot.snapshotId).then((result) => {
+      completionOrder.push('restore')
+      return result
+    })
+
+    await Promise.resolve()
+    assert.deepEqual(lockEntries, [])
+    assert.deepEqual(completionOrder, [])
+
+    releaseHolder.resolve()
+    const [captured, restored] = await Promise.all([capturePromise, restorePromise])
+    await holder
+    assert.deepEqual(lockEntries, ['entered', 'entered'])
+    assert.deepEqual(completionOrder, ['capture', 'restore'])
+    assert.notEqual(captured.snapshotId, targetSnapshot.snapshotId)
+    assert.equal(restored.snapshotId, targetSnapshot.snapshotId)
+    assert.deepEqual(
+      await readFile(resolveWhitelist(home, profile).get('home/settings.yaml')!),
+      initialFiles['home/settings.yaml'],
+    )
   })
 })
