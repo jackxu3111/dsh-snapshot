@@ -1,0 +1,389 @@
+import assert from 'node:assert/strict'
+import { chmod, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import test from 'node:test'
+import { join } from 'node:path'
+
+import { SnapshotError } from '../src/errors.ts'
+import { nodeFileSystem } from '../src/filesystem.ts'
+import type { FileSystem } from '../src/filesystem.ts'
+import { profileRoot, resolveWhitelist, snapshotRoot } from '../src/policy.ts'
+import { SnapshotRepository, sha256 } from '../src/repository.ts'
+import { MAX_FILE_BYTES, MAX_SNAPSHOT_BYTES } from '../src/types.ts'
+import type { LogicalPath } from '../src/types.ts'
+import { CaptureService } from '../src/capture.ts'
+import {
+  allLogicalPaths,
+  immediateWriterLock,
+  withTemporaryDshHome,
+} from './helpers.ts'
+
+const fixedDate = new Date('2026-08-20T10:45:30.123Z')
+
+type FixtureFiles = Partial<Readonly<Record<LogicalPath, Buffer>>>
+
+async function seedProfile(home: string, files: FixtureFiles, profile = 'work'): Promise<void> {
+  await mkdir(profileRoot(home, profile), { recursive: true, mode: 0o700 })
+  const targets = resolveWhitelist(home, profile)
+
+  for (const [logicalPath, bytes] of Object.entries(files)) {
+    const target = targets.get(logicalPath as LogicalPath)
+    assert.ok(target)
+    await writeFile(target, bytes)
+    await chmod(target, 0o640)
+  }
+}
+
+function makeRepository(home: string, randomHexes = ['a1b2c3']): SnapshotRepository {
+  let index = 0
+  return new SnapshotRepository({
+    dshHome: home,
+    now: fixedDate,
+    randomHex: () => randomHexes[index++] ?? 'f0f0f0',
+  })
+}
+
+function makeCapture(
+  home: string,
+  options: {
+    fs?: FileSystem
+    randomHexes?: string[]
+    writerLock?: ReturnType<typeof immediateWriterLock>
+    now?: Date
+  } = {},
+): {
+  capture: CaptureService
+  repository: SnapshotRepository
+  writerLock: ReturnType<typeof immediateWriterLock>
+} {
+  const repository = makeRepository(home, options.randomHexes)
+  const writerLock = options.writerLock ?? immediateWriterLock()
+  return {
+    capture: new CaptureService({
+      dshHome: home,
+      repository,
+      fs: options.fs,
+      now: options.now ?? fixedDate,
+      pluginVersion: '1.2.3',
+      dshVersion: '4.5.6',
+      writerLock,
+    }),
+    repository,
+    writerLock,
+  }
+}
+
+async function assertNoPublishedOrTemporarySnapshot(home: string): Promise<void> {
+  try {
+    const entries = await readdir(snapshotRoot(home))
+    assert.deepEqual(entries, [])
+  } catch (error) {
+    assert.equal((error as NodeJS.ErrnoException).code, 'ENOENT')
+  }
+}
+
+function copyMetadata(metadata: unknown, changes: Record<string, unknown>): unknown {
+  return {
+    ...(metadata as Record<string, unknown>),
+    ...changes,
+    isFile: () => true,
+  }
+}
+
+test('captures all six canonical entries with present/absent metadata and safe warning', async () => {
+  await withTemporaryDshHome(async (home) => {
+    const files: FixtureFiles = {
+      'home/settings.yaml': Buffer.from('settings\n'),
+      'home/cordis.patch.yml': Buffer.from('home patch\n'),
+      'profile/package.json': Buffer.from('{"name":"work"}\n'),
+      'profile/cordis.patch.yml': Buffer.from('profile patch\n'),
+      'profile/pnpm-lock.yaml': Buffer.from('lock\n'),
+    }
+    await seedProfile(home, files)
+    const { capture, repository, writerLock } = makeCapture(home)
+
+    const result = await capture.capture({ profile: 'work', label: '  release  ' })
+
+    assert.equal(writerLock.calls, 1)
+    assert.equal(result.snapshotId, '20260820T104530123Z-a1b2c3')
+    assert.equal(result.createdAt, fixedDate.toISOString())
+    assert.equal(result.profile, 'work')
+    assert.equal(result.kind, 'normal')
+    assert.deepEqual(result.present, allLogicalPaths.slice(0, 5))
+    assert.deepEqual(result.absent, ['profile/pnpm-workspace.yaml'])
+    assert.match(result.warning, /local/i)
+    assert.match(result.warning, /sensitive/i)
+    assert.match(result.warning, /do not share/i)
+
+    const manifest = await repository.readManifest(result.snapshotId)
+    assert.equal(manifest.schemaVersion, 1)
+    assert.equal(manifest.pluginVersion, '1.2.3')
+    assert.equal(manifest.dshVersion, '4.5.6')
+    assert.equal(manifest.label, 'release')
+    assert.deepEqual(
+      manifest.entries.map((entry) => entry.logicalPath),
+      allLogicalPaths,
+    )
+
+    for (const [index, entry] of manifest.entries.entries()) {
+      const logicalPath = allLogicalPaths[index]
+      assert.ok(logicalPath)
+      const expected = files[logicalPath]
+      if (expected === undefined) {
+        assert.deepEqual(entry, { logicalPath, status: 'absent' })
+        continue
+      }
+
+      assert.equal(entry.status, 'present')
+      assert.equal(entry.bytes, expected.byteLength)
+      assert.equal(entry.sha256, sha256(expected))
+      assert.equal(entry.mode, 0o640)
+      assert.equal(Object.keys(entry).length, 6)
+      const payload: Buffer = await readFile(join(snapshotRoot(home), result.snapshotId, 'files', entry.storedName))
+      assert.deepEqual(payload, expected)
+    }
+  })
+})
+
+test('trims labels and limits them to 120 Unicode code points', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, {})
+    const { capture, repository } = makeCapture(home)
+    const label = `  ${'🙂'.repeat(121)}  `
+    const expected = Array.from(label.trim()).slice(0, 120).join('')
+
+    const result = await capture.capture({ profile: 'work', label })
+    const manifest = await repository.readManifest(result.snapshotId)
+
+    assert.equal(manifest.label, expected)
+    assert.equal(Array.from(manifest.label ?? '').length, 120)
+  })
+})
+
+test('captureUnlocked publishes without acquiring the writer lock', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, {})
+    const { capture, repository, writerLock } = makeCapture(home, {
+      randomHexes: ['a1b2c3', 'd4e5f6'],
+    })
+
+    await capture.capture({ profile: 'work' })
+    const result = await capture.captureUnlocked({
+      profile: 'work',
+      kind: 'protection',
+      label: 'Before restore',
+    })
+
+    assert.equal(writerLock.calls, 1)
+    const manifest = await repository.readManifest(result.snapshotId)
+    assert.equal(manifest.kind, 'protection')
+    assert.equal(manifest.label, 'Before restore')
+  })
+})
+
+test('retries once when lstat metadata changes during a read', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, { 'home/settings.yaml': Buffer.from('stable after retry') })
+    const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
+    assert.ok(target)
+    let targetLstatCalls = 0
+    const fs = {
+      ...nodeFileSystem,
+      lstat: async (path: string) => {
+        const metadata = await nodeFileSystem.lstat(path)
+        if (path !== target) return metadata
+        targetLstatCalls += 1
+        const mtimeMs = Number((metadata as { mtimeMs: number }).mtimeMs) + (targetLstatCalls < 3 ? targetLstatCalls - 1 : 1)
+        return copyMetadata(metadata, { mtimeMs }) as Awaited<ReturnType<typeof nodeFileSystem.lstat>>
+      },
+    } as unknown as FileSystem
+    const { capture } = makeCapture(home, { fs })
+
+    const result = await capture.capture({ profile: 'work' })
+
+    assert.equal(result.present.includes('home/settings.yaml'), true)
+    assert.equal(targetLstatCalls, 4)
+  })
+})
+
+test('fails after a second unstable read and leaves no snapshot residue', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, { 'home/settings.yaml': Buffer.from('never stable') })
+    const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
+    assert.ok(target)
+    let targetLstatCalls = 0
+    const fs = {
+      ...nodeFileSystem,
+      lstat: async (path: string) => {
+        const metadata = await nodeFileSystem.lstat(path)
+        if (path !== target) return metadata
+        targetLstatCalls += 1
+        return copyMetadata(metadata, { mtimeMs: Number(metadata.mtimeMs) + targetLstatCalls }) as Awaited<
+          ReturnType<typeof nodeFileSystem.lstat>
+        >
+      },
+    } as unknown as FileSystem
+    const { capture, repository } = makeCapture(home, { fs })
+
+    await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'SNAPSHOT_CORRUPT'
+    })
+
+    assert.equal(targetLstatCalls, 4)
+    assert.deepEqual(await repository.list(), [])
+    await assertNoPublishedOrTemporarySnapshot(home)
+  })
+})
+
+test('treats only ENOENT as an absent target', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, {})
+    const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
+    assert.ok(target)
+    const fs = {
+      ...nodeFileSystem,
+      readFile: async (path: string) => {
+        if (path === target) throw Object.assign(new Error('removed'), { code: 'ENOENT' })
+        return nodeFileSystem.readFile(path)
+      },
+    } as unknown as FileSystem
+    const { capture } = makeCapture(home, { fs })
+
+    const result = await capture.capture({ profile: 'work' })
+
+    assert.equal(result.absent.includes('home/settings.yaml'), true)
+  })
+})
+
+test('rejects symlinks and non-regular files before publication', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, { 'home/settings.yaml': Buffer.from('target') })
+    const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
+    assert.ok(target)
+    const outside = join(home, 'outside-settings.yaml')
+    await writeFile(outside, 'outside')
+    await rm(target)
+    await symlink(outside, target)
+    const { capture, repository } = makeCapture(home)
+
+    await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'UNSAFE_FILE_TYPE'
+    })
+
+    assert.deepEqual(await repository.list(), [])
+    await assertNoPublishedOrTemporarySnapshot(home)
+  })
+
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, { 'home/settings.yaml': Buffer.from('target') })
+    const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
+    assert.ok(target)
+    await rm(target)
+    await mkdir(target)
+    const { capture, repository } = makeCapture(home)
+
+    await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'UNSAFE_FILE_TYPE'
+    })
+
+    assert.deepEqual(await repository.list(), [])
+    await assertNoPublishedOrTemporarySnapshot(home)
+  })
+})
+
+test('rejects a missing Profile directory without creating a snapshot', async () => {
+  await withTemporaryDshHome(async (home) => {
+    const { capture, repository } = makeCapture(home)
+
+    await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'SNAPSHOT_NOT_FOUND'
+    })
+
+    assert.deepEqual(await repository.list(), [])
+    await assertNoPublishedOrTemporarySnapshot(home)
+  })
+})
+
+test('enforces the per-file and aggregate size limits before publication', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, { 'home/settings.yaml': Buffer.alloc(MAX_FILE_BYTES + 1) })
+    const { capture, repository } = makeCapture(home)
+
+    await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'SIZE_LIMIT'
+    })
+
+    assert.deepEqual(await repository.list(), [])
+    await assertNoPublishedOrTemporarySnapshot(home)
+  })
+
+  await withTemporaryDshHome(async (home) => {
+    const perFile = Math.floor(MAX_SNAPSHOT_BYTES / allLogicalPaths.length) + 1
+    const files = Object.fromEntries(allLogicalPaths.map((logicalPath) => [logicalPath, Buffer.alloc(perFile)])) as FixtureFiles
+    await seedProfile(home, files)
+    const { capture, repository } = makeCapture(home)
+
+    await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'SIZE_LIMIT'
+    })
+
+    assert.deepEqual(await repository.list(), [])
+    await assertNoPublishedOrTemporarySnapshot(home)
+  })
+})
+
+test('maps EACCES and EPERM to safe remediation without leaking paths or content', async () => {
+  for (const code of ['EACCES', 'EPERM'] as const) {
+    await withTemporaryDshHome(async (home) => {
+      await seedProfile(home, { 'home/settings.yaml': Buffer.from('private secret body') })
+      const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
+      assert.ok(target)
+      const fs = {
+        ...nodeFileSystem,
+        readFile: async (path: string) => {
+          if (path === target) {
+            throw Object.assign(new Error(`${code}: private secret body at ${target}`), { code })
+          }
+          return nodeFileSystem.readFile(path)
+        },
+      } as unknown as FileSystem
+      const { capture, repository } = makeCapture(home, { fs })
+
+      await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
+        return (
+          error instanceof SnapshotError &&
+          error.code === 'SNAPSHOT_CORRUPT' &&
+          /permission/i.test(error.message) &&
+          !error.message.includes(home) &&
+          !error.message.includes('private secret body')
+        )
+      })
+
+      assert.deepEqual(await repository.list(), [])
+      await assertNoPublishedOrTemporarySnapshot(home)
+    })
+  }
+})
+
+test('fails when bytes do not match stable metadata, even if lstat metadata is unchanged', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, { 'home/settings.yaml': Buffer.from('short') })
+    const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
+    assert.ok(target)
+    const fs = {
+      ...nodeFileSystem,
+      readFile: async (path: string) => {
+        const bytes = await nodeFileSystem.readFile(path)
+        if (path === target) return Buffer.concat([bytes, Buffer.from('changed')])
+        return bytes
+      },
+    } as unknown as FileSystem
+    const { capture, repository } = makeCapture(home, { fs })
+
+    await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'SNAPSHOT_CORRUPT'
+    })
+
+    assert.deepEqual(await repository.list(), [])
+    await assertNoPublishedOrTemporarySnapshot(home)
+  })
+})

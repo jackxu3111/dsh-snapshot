@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import type { LogicalPath, Manifest, ManifestEntry } from '../src/types.ts'
 
@@ -39,5 +41,31 @@ export function fixtureManifest(
     pluginVersion: '0.1.0',
     entries,
     ...overrides,
+  }
+}
+
+export async function temporaryDshHome(): Promise<string> {
+  return mkdtemp(join(tmpdir(), 'dsh-snapshot-capture-'))
+}
+
+export async function withTemporaryDshHome<T>(operation: (home: string) => Promise<T>): Promise<T> {
+  const home = await temporaryDshHome()
+  try {
+    return await operation(home)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+}
+
+export function immediateWriterLock(): { calls: number; runExclusive<T>(operation: () => Promise<T>): Promise<T> } {
+  let calls = 0
+  return {
+    get calls() {
+      return calls
+    },
+    runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+      calls += 1
+      return operation()
+    },
   }
 }
