@@ -310,6 +310,27 @@ test('does not remove a replacement lock directory it no longer owns', async () 
   })
 })
 
+test('fails closed when its owned lock directory disappears before release', async () => {
+  await withTemporaryDshHome(async (root) => {
+    const lockPath = join(root, '.writer-lock')
+    let lockLstatCalls = 0
+    const fs = {
+      ...nodeFileSystem,
+      lstat: async (path: string) => {
+        if (path === lockPath && ++lockLstatCalls === 2) {
+          await rm(lockPath, { recursive: true, force: true })
+        }
+        return nodeFileSystem.lstat(path)
+      },
+    } as unknown as FileSystem
+
+    await assert.rejects(
+      new WriterLock({ root, fs }).runExclusive(async () => undefined),
+      (error: unknown) => error instanceof SnapshotError && /operator/i.test(error.message),
+    )
+  })
+})
+
 test('never recursively deletes a cooperative replacement that repopulates the lock during release', async () => {
   await withTemporaryDshHome(async (root) => {
     const lockPath = join(root, '.writer-lock')

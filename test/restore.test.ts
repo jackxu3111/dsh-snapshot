@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import test from 'node:test'
 
 import { CaptureService } from '../src/capture.ts'
@@ -68,6 +69,92 @@ test('restore captures protection under one writer lock then restores present an
     assert.equal(String(await readFile(resolveWhitelist(home, 'work').get('home/settings.yaml')!)), 'snapshot settings')
     await assert.rejects(readFile(resolveWhitelist(home, 'work').get('home/cordis.patch.yml')!), { code: 'ENOENT' })
     assert.equal(String(await readFile(resolveWhitelist(home, 'work').get('profile/package.json')!)), '{"snapshot":true}\n')
+  })
+})
+
+test('rejects a target that appears for an absent snapshot entry during commit without deleting it', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seed(home, { 'home/settings.yaml': Buffer.from('snapshot settings') })
+    const plain = services(home)
+    const snapshot = await plain.capture.capture({ profile: 'work' })
+    await seed(home, { 'home/settings.yaml': Buffer.from('changed settings') })
+
+    const settingsPath = resolveWhitelist(home, 'work').get('home/settings.yaml')!
+    const absentPath = resolveWhitelist(home, 'work').get('home/cordis.patch.yml')!
+    let inserted = false
+    const fs = {
+      ...nodeFileSystem,
+      rename: async (from: string, to: string) => {
+        await nodeFileSystem.rename(from, to)
+        if (!inserted && from === settingsPath) {
+          inserted = true
+          await writeFile(absentPath, 'concurrent file')
+        }
+      },
+    } as typeof nodeFileSystem
+    const restore = new RestoreService({
+      dshHome: home,
+      fs,
+      repository: plain.repository,
+      capture: plain.capture,
+      writerLock: immediateWriterLock(),
+      randomHex: () => 'abcdef',
+    })
+
+    await assert.rejects(
+      restore.restore(snapshot.snapshotId),
+      (error: unknown) => error instanceof SnapshotError && error.code === 'RESTORE_FAILED_ROLLED_BACK',
+    )
+    assert.equal(String(await readFile(settingsPath)), 'changed settings')
+    assert.equal(String(await readFile(absentPath)), 'concurrent file')
+  })
+})
+
+test('rejects a payload symlink swap between preflight and staging when no-follow is unavailable', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seed(home, { 'home/settings.yaml': Buffer.from('snapshot settings') })
+    const plain = services(home)
+    const snapshot = await plain.capture.capture({ profile: 'work' })
+    await seed(home, { 'home/settings.yaml': Buffer.from('changed settings') })
+
+    const payloadPath = join(
+      home,
+      'snapshots',
+      'dsh-snapshot',
+      'v1',
+      snapshot.snapshotId,
+      'files',
+      'entry-0.bin',
+    )
+    const externalPayload = join(home, 'external-payload.bin')
+    await writeFile(externalPayload, 'snapshot settings')
+    let swapped = false
+    const fs = {
+      ...nodeFileSystem,
+      open: async (path: string, ...options: unknown[]) => {
+        if (!swapped && path === payloadPath) {
+          swapped = true
+          await rm(payloadPath)
+          await symlink(externalPayload, payloadPath)
+          return nodeFileSystem.open(path, fsConstants.O_RDONLY)
+        }
+        return (nodeFileSystem.open as unknown as (...args: unknown[]) => Promise<unknown>)(path, ...options)
+      },
+    } as typeof nodeFileSystem
+    const restore = new RestoreService({
+      dshHome: home,
+      fs,
+      repository: plain.repository,
+      capture: plain.capture,
+      writerLock: immediateWriterLock(),
+      randomHex: () => 'abcdef',
+    })
+
+    await assert.rejects(
+      restore.restore(snapshot.snapshotId),
+      (error: unknown) => error instanceof SnapshotError && error.code === 'RESTORE_FAILED_ROLLED_BACK',
+    )
+    assert.equal(String(await readFile(resolveWhitelist(home, 'work').get('home/settings.yaml')!)), 'changed settings')
   })
 })
 

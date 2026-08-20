@@ -63,6 +63,11 @@ function nodeCode(error: unknown): string | undefined {
     : undefined
 }
 
+function unsupportedNoFollowFlag(error: unknown): boolean {
+  const code = nodeCode(error)
+  return code === 'EINVAL' || code === 'ENOTSUP' || code === 'EOPNOTSUPP'
+}
+
 function isRegular(stat: unknown): boolean {
   return typeof stat === 'object' && stat !== null && 'isFile' in stat && typeof stat.isFile === 'function'
     ? Boolean(stat.isFile())
@@ -199,6 +204,8 @@ export class RestoreService {
           record.backup = await this.#availableSibling(record.target, 'backup')
           await this.#fs.rename(record.target, record.backup)
           record.originalMoved = true
+        } else if (await inspectRegular(this.#fs, record.target) !== undefined) {
+          throw new SnapshotError('UNSAFE_FILE_TYPE', 'A restore target appeared during commit')
         }
         if (record.stage !== undefined) {
           if (record.stageIdentity === undefined || !sameIdentity(record.stageIdentity, await this.#requireSameRegular(record.stage, record.stageIdentity))) {
@@ -277,9 +284,24 @@ export class RestoreService {
     let output: Awaited<ReturnType<FileSystem['open']>> | undefined
     try {
       const payload = join(snapshotDirectory(this.#dshHome, snapshotId), 'files', entry.storedName)
-      source = await this.#fs.open(payload, fsConstants.O_RDONLY | O_NOFOLLOW)
+      const beforeOpen = await this.#fs.lstat(payload)
+      if (!isRegular(beforeOpen)) throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot payload is unsafe')
+      try {
+        source = await this.#fs.open(payload, fsConstants.O_RDONLY | O_NOFOLLOW)
+      } catch (error) {
+        if (O_NOFOLLOW === 0 || !unsupportedNoFollowFlag(error)) throw error
+        source = await this.#fs.open(payload, fsConstants.O_RDONLY)
+      }
       const sourceStat = await source.stat()
-      if (!isRegular(sourceStat)) throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot payload is unsafe')
+      const afterOpen = await this.#fs.lstat(payload)
+      if (
+        !isRegular(sourceStat) ||
+        !isRegular(afterOpen) ||
+        !sameIdentity(identity(beforeOpen), identity(sourceStat)) ||
+        !sameIdentity(identity(sourceStat), identity(afterOpen))
+      ) {
+        throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot payload is unsafe')
+      }
       const bytes = Buffer.from(await source.readFile())
       if (bytes.byteLength !== entry.bytes || sha256(bytes) !== entry.sha256) {
         throw new SnapshotError('SNAPSHOT_CORRUPT', 'Snapshot payload changed during restore')
@@ -334,9 +356,6 @@ export class RestoreService {
       }
       if (record.originalMoved && record.backup !== undefined && targetRemoved) {
         try { await this.#fs.rename(record.backup, record.target); await this.#syncDirectory(dirname(record.target)) } catch (error) { failures.push(error) }
-      }
-      if (!record.originalPresent && !record.installed) {
-        try { await removeIfPresent(this.#fs, record.target); await this.#syncDirectory(dirname(record.target)) } catch (error) { failures.push(error) }
       }
       if (record.stage !== undefined) {
         try { await removeIfPresent(this.#fs, record.stage); await this.#syncDirectory(dirname(record.stage)) } catch (error) { failures.push(error) }

@@ -166,7 +166,7 @@ export class WriterLock implements WriterLockLike {
       const current = await this.#fs.lstat(ownedLock.path)
       if (!sameLock(ownedLock.identity, current)) throw recoveryRequired(undefined, this.#root)
     } catch (error) {
-      if (isNodeError(error) && error.code === 'ENOENT') return
+      if (isNodeError(error) && error.code === 'ENOENT') throw recoveryRequired(error, this.#root)
       if (error instanceof SnapshotError) throw error
       throw releaseFailure(error)
     }
