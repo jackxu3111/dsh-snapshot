@@ -245,3 +245,39 @@ test('does not overwrite a pre-existing sibling backup when its name collides', 
     assert.equal(String(await readFile(target)), 'original')
   })
 })
+
+test('rollback restores a backup after target removal sync fails and reports manual recovery', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seed(home, { 'home/settings.yaml': Buffer.from('snapshot') })
+    const plain = services(home)
+    const snapshot = await plain.capture.capture({ profile: 'work' })
+    await seed(home, { 'home/settings.yaml': Buffer.from('original') })
+    const injected = faultInjectingFileSystem(nodeFileSystem, {
+      method: 'sync', failAtCall: [2, 3], error: Object.assign(new Error('busy'), { code: 'EBUSY' }),
+    })
+    const restore = new RestoreService({
+      dshHome: home, fs: injected.fs, repository: plain.repository, capture: plain.capture,
+      writerLock: immediateWriterLock(), randomHex: () => 'abcdef',
+    })
+    await assert.rejects(restore.restore(snapshot.snapshotId), (error: unknown) =>
+      error instanceof SnapshotError && error.code === 'RESTORE_FAILED_MANUAL_RECOVERY')
+    assert.equal(String(await readFile(resolveWhitelist(home, 'work').get('home/settings.yaml')!)), 'original')
+  })
+})
+
+test('wrapped stage permission failure says no target changed and retains remediation', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seed(home, { 'home/settings.yaml': Buffer.from('snapshot') })
+    const plain = services(home)
+    const snapshot = await plain.capture.capture({ profile: 'work' })
+    const injected = faultInjectingFileSystem(nodeFileSystem, {
+      method: 'write', failAtCall: 1, error: Object.assign(new Error('denied'), { code: 'EACCES' }),
+    })
+    const restore = new RestoreService({
+      dshHome: home, fs: injected.fs, repository: plain.repository, capture: plain.capture,
+      writerLock: immediateWriterLock(), randomHex: () => 'abcdef',
+    })
+    await assert.rejects(restore.restore(snapshot.snapshotId), (error: unknown) =>
+      error instanceof SnapshotError && error.code === 'RESTORE_FAILED_ROLLED_BACK' && /before configuration changes/i.test(error.message) && /permissions/i.test(error.message))
+  })
+})

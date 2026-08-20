@@ -92,9 +92,17 @@ function safeFailure(error: unknown, fallback: string): SnapshotError {
 }
 
 function remediation(error: unknown): string {
-  const code = nodeCode(error)
-  if (code === 'EACCES' || code === 'EPERM') return '; check permissions and try again'
-  if (code === 'EBUSY') return '; close applications using the configuration and try again'
+  let current = error
+  for (let depth = 0; depth < 8; depth += 1) {
+    const code = nodeCode(current)
+    if (code === 'EACCES' || code === 'EPERM') return '; check permissions and try again'
+    if (code === 'EBUSY') return '; close applications using the configuration and try again'
+    if (current instanceof SnapshotError && current.cause !== undefined) {
+      current = current.cause
+      continue
+    }
+    break
+  }
   return ''
 }
 
@@ -208,7 +216,7 @@ export class RestoreService {
       const rollbackFailures = await this.#rollback(journal)
       const mutated = journal.some((record) => record.originalMoved || record.installed)
       if (!mutated) {
-        throw new SnapshotError('RESTORE_FAILED_ROLLED_BACK', 'Restore failed before configuration changes were made', {
+        throw new SnapshotError('RESTORE_FAILED_ROLLED_BACK', `Restore failed before configuration changes were made${remediation(error)}`, {
           cause: error,
           protectionSnapshotId,
         })
@@ -312,7 +320,15 @@ export class RestoreService {
     for (const record of [...journal].reverse()) {
       let targetRemoved = !record.installed
       if (record.installed) {
-        try { await removeIfPresent(this.#fs, record.target); await this.#syncDirectory(dirname(record.target)); targetRemoved = true } catch (error) { failures.push(error) }
+        try {
+          await removeIfPresent(this.#fs, record.target)
+          targetRemoved = true
+        } catch (error) {
+          failures.push(error)
+        }
+        if (targetRemoved) {
+          try { await this.#syncDirectory(dirname(record.target)) } catch (error) { failures.push(error) }
+        }
       }
       if (record.originalMoved && record.backup !== undefined && targetRemoved) {
         try { await this.#fs.rename(record.backup, record.target); await this.#syncDirectory(dirname(record.target)) } catch (error) { failures.push(error) }
