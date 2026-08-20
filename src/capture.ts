@@ -1,6 +1,10 @@
+import { constants as fsConstants } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
+
 import { SnapshotError } from './errors.ts'
 import { nodeFileSystem } from './filesystem.ts'
 import type { FileSystem } from './filesystem.ts'
+import type { FileHandle } from './filesystem.ts'
 import { profileRoot, resolveWhitelist, validateProfile } from './policy.ts'
 import { sha256 } from './repository.ts'
 import type { SnapshotPayloads } from './repository.ts'
@@ -28,6 +32,8 @@ const CANONICAL_LOGICAL_PATHS: readonly LogicalPath[] = [
 
 const CAPTURE_WARNING =
   'This local snapshot may contain sensitive configuration; keep it on this device, do not commit it to Git, and do not share it publicly.'
+const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0
+const READ_ONLY_FLAGS = fsConstants.O_RDONLY | O_NOFOLLOW
 
 type PrimitiveDate = Date | string | number
 type CaptureClock = PrimitiveDate | (() => PrimitiveDate)
@@ -83,6 +89,10 @@ function isNodeError(value: unknown): value is NodeErrorLike {
   return typeof value === 'object' && value !== null && 'code' in value
 }
 
+function unsupportedNoFollowFlag(error: unknown): boolean {
+  return isNodeError(error) && (error.code === 'EINVAL' || error.code === 'ENOTSUP' || error.code === 'EOPNOTSUPP')
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
@@ -130,6 +140,7 @@ function metadataChanged(beforeValue: unknown, afterValue: unknown): boolean {
     !Object.is(before.size, after.size) ||
     !Object.is(timeValue(before, 'mtimeMs', 'mtime'), timeValue(after, 'mtimeMs', 'mtime')) ||
     !Object.is(timeValue(before, 'ctimeMs', 'ctime'), timeValue(after, 'ctimeMs', 'ctime')) ||
+    // Preserve the mode from the same stable file version as the bytes.
     !Object.is(before.mode, after.mode)
   )
 }
@@ -201,19 +212,39 @@ function normalizeLabel(label: string | undefined): string | undefined {
   return limited.length > 0 ? limited : undefined
 }
 
-async function assertProfileDirectory(fs: FileSystem, path: string): Promise<void> {
-  let metadata: unknown
-  try {
-    metadata = await fs.lstat(path)
-  } catch (error) {
-    if (isNodeError(error) && error.code === 'ENOENT') {
-      throw new SnapshotError('SNAPSHOT_NOT_FOUND', 'The requested Profile directory was not found', { cause: error })
-    }
-    throw safeFileSystemError(error, 'The requested Profile directory could not be inspected')
+/**
+ * Reject static symlinks in the DSH Home → Profile directory chain. The
+ * controller threat model intentionally excludes same-UID nanosecond parent
+ * directory races; this check covers the persisted on-disk chain.
+ */
+async function assertProfileDirectoryChain(fs: FileSystem, dshHome: string, profilePath: string): Promise<void> {
+  const base = resolve(dshHome)
+  const target = resolve(profilePath)
+  const remainder = relative(base, target)
+  if (remainder === '..' || remainder.startsWith(`..${sep}`) || remainder.includes(sep + sep)) {
+    throw new SnapshotError('UNSAFE_FILE_TYPE', 'The requested Profile path is outside the DSH Home')
   }
 
-  if (!isDirectory(metadata)) {
-    throw new SnapshotError('UNSAFE_FILE_TYPE', 'The requested Profile path is not a directory')
+  const paths = [base]
+  let current = base
+  for (const part of remainder.split(sep).filter(Boolean)) {
+    current = join(current, part)
+    paths.push(current)
+  }
+
+  for (const path of paths) {
+    let metadata: unknown
+    try {
+      metadata = await fs.lstat(path)
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        throw new SnapshotError('SNAPSHOT_NOT_FOUND', 'The requested Profile directory was not found', { cause: error })
+      }
+      throw safeFileSystemError(error, 'The requested Profile directory could not be inspected')
+    }
+    if (!isDirectory(metadata)) {
+      throw new SnapshotError('UNSAFE_FILE_TYPE', 'The requested Profile directory chain is not safe')
+    }
   }
 }
 
@@ -232,37 +263,84 @@ async function readStableFile(fs: FileSystem, path: string): Promise<StableFile 
     if (beforeSize === undefined) throw new SnapshotError('SNAPSHOT_CORRUPT', 'File metadata is invalid')
     if (beforeSize > MAX_FILE_BYTES) throw sizeLimit('file')
 
-    let raw: Uint8Array
+    let handle: FileHandle | undefined
     try {
-      raw = await fs.readFile(path)
-    } catch (error) {
-      if (isNodeError(error) && error.code === 'ENOENT') return undefined
-      throw safeFileSystemError(error, 'A whitelisted target could not be read')
-    }
-    const bytes = Buffer.from(raw)
-    if (bytes.byteLength > MAX_FILE_BYTES) throw sizeLimit('file')
-
-    let after: unknown
-    try {
-      after = await fs.lstat(path)
-    } catch (error) {
-      if (isNodeError(error) && error.code === 'ENOENT') {
-        if (attempt === 0) continue
-        return undefined
+      try {
+        try {
+          handle = await fs.open(path, READ_ONLY_FLAGS)
+        } catch (error) {
+          if (O_NOFOLLOW === 0 || !unsupportedNoFollowFlag(error)) throw error
+          handle = await fs.open(path, fsConstants.O_RDONLY)
+        }
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'ENOENT') {
+          if (attempt === 0) continue
+          return undefined
+        }
+        throw safeFileSystemError(error, 'A whitelisted target could not be opened')
       }
-      throw safeFileSystemError(error, 'A whitelisted target could not be rechecked')
-    }
 
-    if (!isRegularFile(after)) throw invalidFileType()
-    const afterSize = metadataSize(after)
-    if (afterSize === undefined) throw new SnapshotError('SNAPSHOT_CORRUPT', 'File metadata is invalid')
-    if (afterSize > MAX_FILE_BYTES) throw sizeLimit('file')
-    if (metadataChanged(before, after) || bytes.byteLength !== afterSize) {
-      if (attempt === 0) continue
-      throw unstableFile()
-    }
+      let opened: unknown
+      try {
+        opened = await handle.stat()
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'ENOENT') {
+          if (attempt === 0) continue
+          return undefined
+        }
+        throw safeFileSystemError(error, 'A whitelisted target could not be inspected')
+      }
+      if (!isRegularFile(opened)) throw invalidFileType()
+      const openedSize = metadataSize(opened)
+      if (openedSize === undefined) throw new SnapshotError('SNAPSHOT_CORRUPT', 'File metadata is invalid')
+      if (openedSize > MAX_FILE_BYTES) throw sizeLimit('file')
+      if (metadataChanged(before, opened)) {
+        if (attempt === 0) continue
+        throw unstableFile()
+      }
 
-    return { bytes, mode: metadataMode(after) }
+      let raw: Uint8Array
+      try {
+        raw = await handle.readFile()
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'ENOENT') {
+          if (attempt === 0) continue
+          return undefined
+        }
+        throw safeFileSystemError(error, 'A whitelisted target could not be read')
+      }
+      const bytes = Buffer.from(raw)
+      if (bytes.byteLength > MAX_FILE_BYTES) throw sizeLimit('file')
+
+      let after: unknown
+      try {
+        after = await fs.lstat(path)
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'ENOENT') {
+          if (attempt === 0) continue
+          return undefined
+        }
+        throw safeFileSystemError(error, 'A whitelisted target could not be rechecked')
+      }
+
+      if (!isRegularFile(after)) throw invalidFileType()
+      const afterSize = metadataSize(after)
+      if (afterSize === undefined) throw new SnapshotError('SNAPSHOT_CORRUPT', 'File metadata is invalid')
+      if (afterSize > MAX_FILE_BYTES) throw sizeLimit('file')
+      if (
+        metadataChanged(before, after) ||
+        metadataChanged(opened, after) ||
+        bytes.byteLength !== openedSize ||
+        bytes.byteLength !== afterSize
+      ) {
+        if (attempt === 0) continue
+        throw unstableFile()
+      }
+
+      return { bytes, mode: metadataMode(after) }
+    } finally {
+      if (handle !== undefined) await handle.close()
+    }
   }
 
   throw unstableFile()
@@ -301,7 +379,7 @@ export class CaptureService {
     const label = normalizeLabel(input.label)
     const createdAt = toDate(this.#now).toISOString()
     const profilePath = profileRoot(this.#dshHome, profile)
-    await assertProfileDirectory(this.#fs, profilePath)
+    await assertProfileDirectoryChain(this.#fs, this.#dshHome, profilePath)
     const targets = resolveWhitelist(this.#dshHome, profile)
     const entries: ManifestEntry[] = []
     const payloads = new Map<LogicalPath, Buffer>()

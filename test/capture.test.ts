@@ -89,6 +89,22 @@ function copyMetadata(metadata: unknown, changes: Record<string, unknown>): unkn
   }
 }
 
+function wrapCaptureHandle(
+  handle: unknown,
+  readFile: () => Promise<Buffer>,
+  stat?: () => Promise<unknown>,
+): unknown {
+  const fileHandle = handle as {
+    stat: () => Promise<unknown>
+    close: () => Promise<void>
+  }
+  return {
+    stat: stat ?? (() => fileHandle.stat()),
+    readFile,
+    close: () => fileHandle.close(),
+  }
+}
+
 test('captures all six canonical entries with present/absent metadata and safe warning', async () => {
   await withTemporaryDshHome(async (home) => {
     const files: FixtureFiles = {
@@ -186,6 +202,7 @@ test('retries once when lstat metadata changes during a read', async () => {
     const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
     assert.ok(target)
     let targetLstatCalls = 0
+    let latestTargetMetadata: unknown
     const fs = {
       ...nodeFileSystem,
       lstat: async (path: string) => {
@@ -193,7 +210,17 @@ test('retries once when lstat metadata changes during a read', async () => {
         if (path !== target) return metadata
         targetLstatCalls += 1
         const mtimeMs = Number((metadata as { mtimeMs: number }).mtimeMs) + (targetLstatCalls < 3 ? targetLstatCalls - 1 : 1)
-        return copyMetadata(metadata, { mtimeMs }) as Awaited<ReturnType<typeof nodeFileSystem.lstat>>
+        latestTargetMetadata = copyMetadata(metadata, { mtimeMs })
+        return latestTargetMetadata as Awaited<ReturnType<typeof nodeFileSystem.lstat>>
+      },
+      open: async (path: unknown, ...options: unknown[]) => {
+        const handle = await (nodeFileSystem.open as unknown as (...args: unknown[]) => Promise<unknown>)(path, ...options)
+        if (path !== target) return handle
+        return wrapCaptureHandle(
+          handle,
+          () => (handle as { readFile: () => Promise<Buffer> }).readFile(),
+          async () => latestTargetMetadata,
+        )
       },
     } as unknown as FileSystem
     const { capture } = makeCapture(home, { fs })
@@ -211,15 +238,26 @@ test('fails after a second unstable read and leaves no snapshot residue', async 
     const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
     assert.ok(target)
     let targetLstatCalls = 0
+    let latestTargetMetadata: unknown
     const fs = {
       ...nodeFileSystem,
       lstat: async (path: string) => {
+        if (path === target) targetLstatCalls += 1
         const metadata = await nodeFileSystem.lstat(path)
         if (path !== target) return metadata
-        targetLstatCalls += 1
-        return copyMetadata(metadata, { mtimeMs: Number(metadata.mtimeMs) + targetLstatCalls }) as Awaited<
+        latestTargetMetadata = copyMetadata(metadata, { mtimeMs: Number(metadata.mtimeMs) + targetLstatCalls })
+        return latestTargetMetadata as Awaited<
           ReturnType<typeof nodeFileSystem.lstat>
         >
+      },
+      open: async (path: unknown, ...options: unknown[]) => {
+        const handle = await (nodeFileSystem.open as unknown as (...args: unknown[]) => Promise<unknown>)(path, ...options)
+        if (path !== target) return handle
+        return wrapCaptureHandle(
+          handle,
+          () => (handle as { readFile: () => Promise<Buffer> }).readFile(),
+          async () => latestTargetMetadata,
+        )
       },
     } as unknown as FileSystem
     const { capture, repository } = makeCapture(home, { fs })
@@ -234,15 +272,56 @@ test('fails after a second unstable read and leaves no snapshot residue', async 
   })
 })
 
-test('treats only ENOENT as an absent target', async () => {
+test('retries a transient ENOENT after an initial lstat', async () => {
   await withTemporaryDshHome(async (home) => {
-    await seedProfile(home, {})
+    await seedProfile(home, { 'home/settings.yaml': Buffer.from('recovered after retry') })
     const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
     assert.ok(target)
+    let openAttempts = 0
     const fs = {
       ...nodeFileSystem,
+      open: async (path: unknown, ...options: unknown[]) => {
+        if (path === target && openAttempts++ === 0) {
+          throw Object.assign(new Error('transient open removal'), { code: 'ENOENT' })
+        }
+        return (nodeFileSystem.open as unknown as (...args: unknown[]) => Promise<unknown>)(path, ...options)
+      },
+    } as unknown as FileSystem
+    const { capture } = makeCapture(home, { fs })
+
+    const result = await capture.capture({ profile: 'work' })
+
+    assert.equal(result.present.includes('home/settings.yaml'), true)
+    assert.equal(openAttempts, 2)
+  })
+})
+
+test('reports absent only after a read ENOENT remains absent on retry', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, { 'home/settings.yaml': Buffer.from('removed during capture') })
+    const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
+    assert.ok(target)
+    let targetLstatCalls = 0
+    let readAttempts = 0
+    const fs = {
+      ...nodeFileSystem,
+      lstat: async (path: string) => {
+        if (path === target) targetLstatCalls += 1
+        const metadata = await nodeFileSystem.lstat(path)
+        return metadata
+      },
+      open: async (path: unknown, ...options: unknown[]) => {
+        const handle = await (nodeFileSystem.open as unknown as (...args: unknown[]) => Promise<unknown>)(path, ...options)
+        if (path !== target || readAttempts++ !== 0) return handle
+        return wrapCaptureHandle(handle, async () => {
+          await rm(target)
+          throw Object.assign(new Error('stable removal'), { code: 'ENOENT' })
+        })
+      },
       readFile: async (path: string) => {
-        if (path === target) throw Object.assign(new Error('removed'), { code: 'ENOENT' })
+        if (path === target) {
+          throw new Error('capture must read through its opened handle')
+        }
         return nodeFileSystem.readFile(path)
       },
     } as unknown as FileSystem
@@ -251,6 +330,8 @@ test('treats only ENOENT as an absent target', async () => {
     const result = await capture.capture({ profile: 'work' })
 
     assert.equal(result.absent.includes('home/settings.yaml'), true)
+    assert.equal(targetLstatCalls, 2)
+    assert.equal(readAttempts, 1)
   })
 })
 
@@ -279,6 +360,67 @@ test('rejects symlinks and non-regular files before publication', async () => {
     assert.ok(target)
     await rm(target)
     await mkdir(target)
+    const { capture, repository } = makeCapture(home)
+
+    await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
+      return error instanceof SnapshotError && error.code === 'UNSAFE_FILE_TYPE'
+    })
+
+    assert.deepEqual(await repository.list(), [])
+    await assertNoPublishedOrTemporarySnapshot(home)
+  })
+})
+
+test('rejects a leaf symlink swap before reading outside the whitelist', async () => {
+  await withTemporaryDshHome(async (home) => {
+    await seedProfile(home, { 'home/settings.yaml': Buffer.from('inside') })
+    const target = resolveWhitelist(home, 'work').get('home/settings.yaml')
+    assert.ok(target)
+    const outside = join(home, 'outside-settings.yaml')
+    await writeFile(outside, 'escape')
+    let originalMetadata: unknown
+    let swapped = false
+    const swapTarget = async (): Promise<void> => {
+      if (swapped) return
+      swapped = true
+      await rm(target)
+      await symlink(outside, target)
+    }
+    const fs = {
+      ...nodeFileSystem,
+      lstat: async (path: string) => {
+        const metadata = await nodeFileSystem.lstat(path)
+        if (path === target) {
+          originalMetadata ??= metadata
+          return originalMetadata
+        }
+        return metadata
+      },
+      readFile: async (path: string) => {
+        if (path === target) await swapTarget()
+        return nodeFileSystem.readFile(path)
+      },
+      open: async (path: unknown, ...options: unknown[]) => {
+        if (path === target) await swapTarget()
+        return (nodeFileSystem.open as unknown as (...args: unknown[]) => Promise<unknown>)(path, ...options)
+      },
+    } as unknown as FileSystem
+    const { capture, repository } = makeCapture(home, { fs })
+
+    await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
+      return error instanceof SnapshotError
+    })
+
+    assert.deepEqual(await repository.list(), [])
+    await assertNoPublishedOrTemporarySnapshot(home)
+  })
+})
+
+test('rejects a static symlink in the DSH Home to Profile directory chain', async () => {
+  await withTemporaryDshHome(async (home) => {
+    const outsideProfiles = join(home, 'outside-profiles')
+    await mkdir(join(outsideProfiles, 'work'), { recursive: true })
+    await symlink(outsideProfiles, join(home, 'profiles'))
     const { capture, repository } = makeCapture(home)
 
     await assert.rejects(capture.capture({ profile: 'work' }), (error: unknown) => {
@@ -339,11 +481,11 @@ test('maps EACCES and EPERM to safe remediation without leaking paths or content
       assert.ok(target)
       const fs = {
         ...nodeFileSystem,
-        readFile: async (path: string) => {
+        open: async (path: unknown, ...options: unknown[]) => {
           if (path === target) {
             throw Object.assign(new Error(`${code}: private secret body at ${target}`), { code })
           }
-          return nodeFileSystem.readFile(path)
+          return (nodeFileSystem.open as unknown as (...args: unknown[]) => Promise<unknown>)(path, ...options)
         },
       } as unknown as FileSystem
       const { capture, repository } = makeCapture(home, { fs })
@@ -371,10 +513,13 @@ test('fails when bytes do not match stable metadata, even if lstat metadata is u
     assert.ok(target)
     const fs = {
       ...nodeFileSystem,
-      readFile: async (path: string) => {
-        const bytes = await nodeFileSystem.readFile(path)
-        if (path === target) return Buffer.concat([bytes, Buffer.from('changed')])
-        return bytes
+      open: async (path: unknown, ...options: unknown[]) => {
+        const handle = await (nodeFileSystem.open as unknown as (...args: unknown[]) => Promise<unknown>)(path, ...options)
+        if (path !== target) return handle
+        return wrapCaptureHandle(handle, async () => {
+          const bytes = await (handle as { readFile: () => Promise<Buffer> }).readFile()
+          return Buffer.concat([bytes, Buffer.from('changed')])
+        })
       },
     } as unknown as FileSystem
     const { capture, repository } = makeCapture(home, { fs })
