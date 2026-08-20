@@ -10,6 +10,7 @@ export interface ResolveDshHomeOptions {
 }
 
 const SNAPSHOT_ID_PATTERN = /^\d{8}T\d{9}Z-[0-9a-f]{6}$/
+const WINDOWS_RESERVED_PROFILE_NAMES = new Set(['', '.', '..', 'node_modules'])
 
 const HOME_TARGETS: ReadonlyArray<readonly [LogicalPath, string]> = [
   ['home/settings.yaml', 'settings.yaml'],
@@ -39,12 +40,15 @@ export function resolveDshHome(options: ResolveDshHomeOptions = {}): string {
 }
 
 export function validateProfile(profile: string): string {
+  if (typeof profile !== 'string') throw new TypeError('Invalid profile')
+
+  const withoutWindowsTrailingDotsOrSpaces = profile.replace(/[ .]+$/g, '')
+  const windowsComparableProfile = withoutWindowsTrailingDotsOrSpaces.toLowerCase()
+
   if (
-    typeof profile !== 'string' ||
     profile.trim().length === 0 ||
-    profile === '.' ||
-    profile === '..' ||
-    profile === 'node_modules' ||
+    withoutWindowsTrailingDotsOrSpaces !== profile ||
+    WINDOWS_RESERVED_PROFILE_NAMES.has(windowsComparableProfile) ||
     profile.includes('/') ||
     profile.includes('\\') ||
     profile.includes(':')

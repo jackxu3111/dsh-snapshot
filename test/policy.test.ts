@@ -57,13 +57,40 @@ test('blank explicit home is treated as unset', () => {
 })
 
 test('profile validation accepts portable profile names and returns the name', () => {
-  for (const value of ['default', 'work_1', 'profile-name']) {
+  for (const value of [
+    'default',
+    'WORK',
+    'work_1',
+    'profile-name',
+    'profile.v1',
+    'node_modules_backup',
+  ]) {
     assert.equal(validateProfile(value), value)
   }
 })
 
 test('profile validation rejects blank, reserved, and separated names', () => {
   const invalidProfiles = ['', ' ', '\t', '.', '..', 'node_modules', 'a/b', 'a\\b']
+
+  for (const value of invalidProfiles) {
+    assert.throws(() => validateProfile(value), /invalid profile/i, value)
+  }
+})
+
+test('profile validation rejects Windows-equivalent reserved names', () => {
+  const invalidProfiles = [
+    'NODE_MODULES',
+    'Node_Modules',
+    'node_modules.',
+    'node_modules..',
+    'node_modules ',
+    'node_modules. ',
+    '...',
+    '. ',
+    '.. ',
+    'profile.',
+    'profile ',
+  ]
 
   for (const value of invalidProfiles) {
     assert.throws(() => validateProfile(value), /invalid profile/i, value)
