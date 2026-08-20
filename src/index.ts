@@ -1,6 +1,13 @@
 import { writeFileSync } from 'node:fs'
 
-import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
+import {
+  defineTool,
+  ToolArgsError,
+  validateJsonSchemaValue,
+  type ObjectJsonSchema,
+  type ToolDefinition,
+} from '@deepseek-ai/dsh-tools'
 
 import { CaptureService } from './capture.ts'
 import { SnapshotError } from './errors.ts'
@@ -122,11 +129,23 @@ export function createServices(options: CreateServicesOptions = {}): SnapshotSer
   return { repository, writerLock, capture, restore }
 }
 
-function publicFailure(error: unknown, fallback: string): SnapshotError {
-  if (error instanceof SnapshotError) {
-    return new SnapshotError(error.code, error.toPublic().message, { cause: error })
+class SnapshotToolError extends HarnessError {
+  constructor(message: string, code: string, cause: unknown) {
+    super(message, code, { cause })
+    this.name = 'SnapshotToolError'
   }
-  return new SnapshotError('SNAPSHOT_CORRUPT', fallback, { cause: error })
+
+  toPublic(): { code: string; message: string } {
+    return { code: this.code, message: this.message }
+  }
+}
+
+function publicFailure(error: unknown, fallback: string): SnapshotToolError {
+  if (error instanceof SnapshotError) {
+    const publicError = error.toPublic()
+    return new SnapshotToolError(publicError.message, publicError.code, error)
+  }
+  return new SnapshotToolError(fallback, 'SNAPSHOT_CORRUPT', error)
 }
 
 function requireProfile(value: string): string {
@@ -177,12 +196,19 @@ function toolOutput<T extends object>(schema: T) {
 }
 
 function withStrictParameters(tool: ToolDefinition): RegisteredTool {
+  const parameters = {
+    ...tool.parameters,
+    required: Array.isArray(tool.parameters.required) ? tool.parameters.required : [],
+    additionalProperties: false,
+  } as ObjectJsonSchema
+  const execute = tool.execute.bind(tool)
   return {
     ...tool,
-    parameters: {
-      ...tool.parameters,
-      required: tool.parameters.required ?? [],
-      additionalProperties: false,
+    parameters,
+    async execute(args: unknown, execution: Parameters<ToolDefinition['execute']>[1]) {
+      const violations = validateJsonSchemaValue(parameters, args)
+      if (violations.length > 0) throw new ToolArgsError(violations)
+      return execute(args, execution)
     },
   } as unknown as RegisteredTool
 }

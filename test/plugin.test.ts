@@ -3,6 +3,9 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import test from 'node:test'
 import { join } from 'node:path'
 
+import { HarnessError } from '@deepseek-ai/dsh-llm'
+
+import * as pluginModule from '../src/index.ts'
 import {
   apply,
   createServices,
@@ -52,6 +55,7 @@ test('registers exactly three named tools with strict input and output schemas',
   const registry = fakeRegistry()
   apply({ tools: registry })
 
+  assert.equal(Object.hasOwn(pluginModule, 'default'), false)
   assert.deepEqual(registry.tools.map((tool) => tool.name), [
     'snapshot_create',
     'snapshot_list',
@@ -83,6 +87,28 @@ test('registers exactly three named tools with strict input and output schemas',
   }
   assert.match(create.description, /sensitive|private/i)
   assert.match(restore.description, /protection|rollback|restore/i)
+})
+
+test('rejects additional properties before any tool service executes', async () => {
+  const services = createServices({ dshHome: '/tmp/dsh-snapshot-plugin-unused' })
+  const registry = registeredTools(services)
+  const cases = [
+    ['snapshot_create', { profile: 'work', unexpected: true }],
+    ['snapshot_list', { unexpected: true }],
+    ['snapshot_restore', { snapshotId: '20260820T104530123Z-a1b2c3', unexpected: true }],
+  ] as const
+
+  for (const [toolName, args] of cases) {
+    const tool = registry.tools.find((candidate) => candidate.name === toolName)
+    assert.ok(tool)
+    await assert.rejects(
+      tool.execute(args, executionStub as never),
+      (error: unknown) => {
+        assert.equal((error as { code?: unknown }).code, 'INVALID_ARGS')
+        return true
+      },
+    )
+  }
 })
 
 test('create result includes id, counts, and sensitivity warning without payload data', async () => {
@@ -166,6 +192,7 @@ test('tool failures expose only public SnapshotError data while retaining the ca
   await assert.rejects(
     create.execute({ profile: '../secret' }, executionStub as never),
     (error: unknown) => {
+      assert.equal(error instanceof HarnessError, true)
       assert.equal(typeof error, 'object')
       const candidate = error as { code?: string; message?: string; cause?: unknown; toPublic?: () => unknown }
       assert.equal(candidate.code, 'INVALID_PROFILE')
