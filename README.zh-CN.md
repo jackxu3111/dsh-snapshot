@@ -142,7 +142,10 @@ dsh --profile <profile>
 请替换为那个实际路径。macOS/Linux：
 
 ```sh
-dsh_home="${DSH_HOME:-${HOME:?HOME is not set}/.dsh}"
+case ${DSH_HOME:-} in
+  *[![:space:]]*) dsh_home=$DSH_HOME ;;
+  *) dsh_home="${HOME:?HOME is not set}/.dsh" ;;
+esac
 lock_dir="$dsh_home/snapshots/dsh-snapshot/v1/.writer-lock"
 printf 'Removing verified stale lock: %s\n' "$lock_dir"
 rm -r -- "$lock_dir"
