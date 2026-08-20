@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
+import type { LogicalPath, Manifest, ManifestEntry } from '../src/types.ts'
+
 export function assertPathContained(root: string, candidate: string): void {
   const rootPath = resolve(root)
   const candidatePath = resolve(candidate)
@@ -12,4 +14,30 @@ export function assertPathContained(root: string, candidate: string): void {
     true,
     `${candidatePath} must remain within ${rootPath}`,
   )
+}
+
+export const allLogicalPaths: readonly LogicalPath[] = [
+  'home/settings.yaml',
+  'home/cordis.patch.yml',
+  'profile/package.json',
+  'profile/cordis.patch.yml',
+  'profile/pnpm-lock.yaml',
+  'profile/pnpm-workspace.yaml',
+]
+
+export function fixtureManifest(
+  snapshotId: string,
+  entries: ManifestEntry[],
+  overrides: Partial<Omit<Manifest, 'entries' | 'snapshotId'>> = {},
+): Manifest {
+  return {
+    schemaVersion: 1,
+    snapshotId,
+    createdAt: '2026-08-20T10:45:30.123Z',
+    profile: 'work',
+    kind: 'normal',
+    pluginVersion: '0.1.0',
+    entries,
+    ...overrides,
+  }
 }
