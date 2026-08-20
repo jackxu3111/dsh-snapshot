@@ -21,7 +21,12 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "build": "tsc --target ES2022 --module NodeNext --moduleResolution NodeNext --declaration --outDir dist src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "lint": "node scripts/check-style.mjs --lint",
+    "format:check": "node scripts/check-style.mjs --format",
     "prepack": "npm run build",
     "smoke:loader": "node scripts/smoke-loader.mjs"
   },
