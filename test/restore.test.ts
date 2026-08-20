@@ -199,7 +199,11 @@ for (const [method, failAtCall] of [
   ['rename', 1],
   ['rename', 2],
 ] as const) {
-  test(`a ${method} fault at restore boundary ${failAtCall} rolls back original bytes`, async () => {
+  test(`a ${method} fault at restore boundary ${failAtCall} rolls back original bytes`, {
+    skip: method === 'chmod' && process.platform === 'win32'
+      ? 'Windows restore intentionally skips chmod'
+      : false,
+  }, async () => {
     await withTemporaryDshHome(async (home) => {
       await seed(home, { 'home/settings.yaml': Buffer.from('snapshot') })
       const plain = services(home)
@@ -290,7 +294,9 @@ test('Windows restore skips chmod but still installs staged bytes', async () => 
   })
 })
 
-test('POSIX restore syncs the target directory after rename commits', async () => {
+test('POSIX restore syncs the target directory after rename commits', {
+  skip: process.platform === 'win32' ? 'Windows restore intentionally skips directory sync' : false,
+}, async () => {
   await withTemporaryDshHome(async (home) => {
     await seed(home, { 'home/settings.yaml': Buffer.from('snapshot') })
     const plain = services(home)
@@ -352,7 +358,9 @@ test('does not overwrite a pre-existing sibling backup when its name collides', 
   })
 })
 
-test('rollback restores a backup after target removal sync fails and reports manual recovery', async () => {
+test('rollback restores a backup after target removal sync fails and reports manual recovery', {
+  skip: process.platform === 'win32' ? 'Windows restore intentionally skips directory sync' : false,
+}, async () => {
   await withTemporaryDshHome(async (home) => {
     await seed(home, { 'home/settings.yaml': Buffer.from('snapshot') })
     const plain = services(home)

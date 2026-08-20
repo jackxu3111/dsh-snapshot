@@ -153,7 +153,7 @@ test('captures all six canonical entries with present/absent metadata and safe w
       assert.equal(entry.status, 'present')
       assert.equal(entry.bytes, expected.byteLength)
       assert.equal(entry.sha256, sha256(expected))
-      assert.equal(entry.mode, 0o640)
+      if (process.platform !== 'win32') assert.equal(entry.mode, 0o640)
       assert.equal(Object.keys(entry).length, 6)
       const payload: Buffer = await readFile(join(snapshotRoot(home), result.snapshotId, 'files', entry.storedName))
       assert.deepEqual(payload, expected)

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import test from 'node:test'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { SnapshotError } from '../src/errors.ts'
 import { nodeFileSystem } from '../src/filesystem.ts'
@@ -298,20 +298,22 @@ test('publish writes payloads before a LF manifest with restrictive modes', asyn
     assert.equal(manifestText.includes(home), false)
     assert.equal(manifestText.includes('home patch'), false)
 
-    const rootMode = (await stat(snapshotRoot(home))).mode & 0o777
-    const directoryMode = (await stat(directory)).mode & 0o777
-    const filesMode = (await stat(filesDirectory)).mode & 0o777
-    const manifestMode = (await stat(join(directory, 'manifest.json'))).mode & 0o777
-    assert.equal(rootMode, 0o700)
-    assert.equal(directoryMode, 0o700)
-    assert.equal(filesMode, 0o700)
-    assert.equal(manifestMode, 0o600)
+    if (process.platform !== 'win32') {
+      const rootMode = (await stat(snapshotRoot(home))).mode & 0o777
+      const directoryMode = (await stat(directory)).mode & 0o777
+      const filesMode = (await stat(filesDirectory)).mode & 0o777
+      const manifestMode = (await stat(join(directory, 'manifest.json'))).mode & 0o777
+      assert.equal(rootMode, 0o700)
+      assert.equal(directoryMode, 0o700)
+      assert.equal(filesMode, 0o700)
+      assert.equal(manifestMode, 0o600)
 
-    const storedNames = (manifestFor().entries as Array<ManifestEntry & { status: 'present' }>).map(
-      (entry) => (entry.status === 'present' ? entry.storedName : ''),
-    )
-    for (const storedName of storedNames) {
-      if (storedName) assert.equal((await stat(join(filesDirectory, storedName))).mode & 0o777, 0o600)
+      const storedNames = (manifestFor().entries as Array<ManifestEntry & { status: 'present' }>).map(
+        (entry) => (entry.status === 'present' ? entry.storedName : ''),
+      )
+      for (const storedName of storedNames) {
+        if (storedName) assert.equal((await stat(join(filesDirectory, storedName))).mode & 0o777, 0o600)
+      }
     }
   })
 })
@@ -352,7 +354,7 @@ test('publish syncs payloads before the manifest and performs one final rename',
     await repository.publish(manifestFor(), payloads)
 
     const writes = recording.calls.filter((call) => call.startsWith('write:'))
-    assert.equal(writes.at(-1)?.endsWith('/manifest.json'), true)
+    assert.equal(basename(writes.at(-1)?.slice('write:'.length) ?? ''), 'manifest.json')
     assert.equal(recording.calls.filter((call) => call.startsWith('sync:')).length, 7)
     assert.equal(recording.calls.filter((call) => call.startsWith('rename:')).length, 1)
   })

@@ -74,12 +74,14 @@ test('uses an atomic private lock directory with minimal owner metadata and remo
     await chmod(root, 0o755)
 
     const result = await lock.runExclusive(async () => {
-      assert.equal((await stat(root)).mode & 0o777, 0o700)
       const lockMetadata = await stat(lockPath)
       assert.equal(lockMetadata.isDirectory(), true)
-      assert.equal(lockMetadata.mode & 0o777, 0o700)
       const ownerMetadata = await stat(join(lockPath, 'owner.json'))
-      assert.equal(ownerMetadata.mode & 0o777, 0o600)
+      if (process.platform !== 'win32') {
+        assert.equal((await stat(root)).mode & 0o777, 0o700)
+        assert.equal(lockMetadata.mode & 0o777, 0o700)
+        assert.equal(ownerMetadata.mode & 0o777, 0o600)
+      }
       owner = JSON.parse(await readFile(join(lockPath, 'owner.json'), 'utf8')) as Record<string, unknown>
       return 42
     })
