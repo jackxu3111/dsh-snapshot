@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import test from 'node:test'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -279,6 +279,17 @@ test('publish refuses to replace an immutable existing snapshot ID', async () =>
     await repository.publish(manifestFor(), payloads)
     await assert.rejects(repository.publish(manifestFor(), payloads), SnapshotError)
     assert.equal((await repository.list()).length, 1)
+  })
+})
+
+test('publish does not remove a pre-existing temporary sibling after a name collision', async () => {
+  await withHome(async (home) => {
+    const temporary = join(snapshotRoot(home), '.tmp-a1b2c3')
+    await mkdir(temporary, { recursive: true })
+    const repository = new SnapshotRepository({ dshHome: home, randomHex: () => 'a1b2c3' })
+
+    await assert.rejects(repository.publish(manifestFor(), payloads), SnapshotError)
+    assert.equal((await stat(temporary)).isDirectory(), true)
   })
 })
 

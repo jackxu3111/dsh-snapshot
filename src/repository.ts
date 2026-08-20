@@ -397,6 +397,7 @@ export class SnapshotRepository {
     const root = snapshotRoot(this.#dshHome)
     const finalDirectory = snapshotDirectory(this.#dshHome, manifest.snapshotId)
     let temporaryDirectory: string | undefined
+    let temporaryDirectoryCreated = false
 
     try {
       await this.#fs.mkdir(root, { recursive: true, mode: 0o700 })
@@ -413,6 +414,7 @@ export class SnapshotRepository {
 
       temporaryDirectory = join(root, `.tmp-${selectRandomHex(this.#randomHex)}`)
       await this.#fs.mkdir(temporaryDirectory, { mode: 0o700 })
+      temporaryDirectoryCreated = true
       await this.#fs.chmod(temporaryDirectory, 0o700)
       const filesDirectory = join(temporaryDirectory, 'files')
       await this.#fs.mkdir(filesDirectory, { mode: 0o700 })
@@ -437,7 +439,7 @@ export class SnapshotRepository {
       await this.#fs.rename(temporaryDirectory, finalDirectory)
       temporaryDirectory = undefined
     } catch (error) {
-      if (temporaryDirectory !== undefined) {
+      if (temporaryDirectory !== undefined && temporaryDirectoryCreated) {
         try {
           await this.#fs.rm(temporaryDirectory, { recursive: true, force: true })
         } catch {
