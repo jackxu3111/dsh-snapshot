@@ -2,9 +2,9 @@
 
 Local, reversible configuration snapshots for DeepSeek Harness (`dsh`) profiles.
 
-> **Publication status:** the `v0.1.0` release candidate is approved, but its tag and
-> package asset have not been published yet. The npm package remains intentionally
-> private and has not been published to npm.
+> **Publication status:** source code and the `v0.1.0` package are distributed through
+> [GitHub Releases](https://github.com/jackxu3111/dsh-snapshot/releases/tag/v0.1.0).
+> The npm package remains intentionally private and has not been published to npm.
 
 ## Compatibility
 
@@ -22,9 +22,15 @@ loader smoke passed locally and in the release CI; see
 
 ## Install, restart, and uninstall
 
-The package is not available from npm. Until the approved GitHub Release asset
-is published, create a local tarball from this checkout and add its absolute
-path to an existing or newly initialized Profile:
+The package is not available from npm. Install the reviewed `v0.1.0` release
+tarball into an existing or newly initialized Profile:
+
+```sh
+dsh plugin --profile work add https://github.com/jackxu3111/dsh-snapshot/releases/download/v0.1.0/dsh-snapshot-0.1.0.tgz
+```
+
+To build the same package from a checkout instead, create a local tarball and
+add its absolute path:
 
 ```sh
 npm ci
@@ -200,6 +206,6 @@ It needs the published DSH dependencies and pnpm available on `PATH`.
 
 Release evidence is recorded in
 [`docs/release-checklist.md`](docs/release-checklist.md) and the successful
-[GitHub Actions run](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389095727).
-The approved package will be distributed only through GitHub Releases; it will
-not be published to npm.
+[GitHub Actions run](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389906039).
+The package is distributed only through GitHub Releases; it is not published to
+npm.

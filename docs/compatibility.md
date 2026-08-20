@@ -47,7 +47,7 @@ npm run smoke:loader
 
 A clean local `npm ci`, TypeScript 6 build, 98-test suite, pack inspection,
 and real packed-loader smoke all passed. The same clean-install gates passed in
-[GitHub Actions](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389095727)
+[GitHub Actions](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389906039)
 on Ubuntu, macOS, and Windows with Node.js 22 and 24. The packed-loader job
 installed the generated tarball into an isolated real DSH rc.6 Profile and
 observed the plugin's runtime marker.

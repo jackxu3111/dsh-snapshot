@@ -1,9 +1,12 @@
 # v0.1.0 release checklist
 
-Reviewed locally and in GitHub Actions on 2026-08-21. This document records the
-approved `v0.1.0` release candidate; the final publication URL is recorded after
-tag creation. `package.json` remains `private: true` and npm publication is
-disabled.
+Reviewed locally and in GitHub Actions on 2026-08-21. The approved candidate is
+published as [GitHub Release v0.1.0](https://github.com/jackxu3111/dsh-snapshot/releases/tag/v0.1.0).
+`package.json` remains `private: true` and npm publication is disabled.
+
+The attached `dsh-snapshot-0.1.0.tgz` contains 41 reviewed files. Its SHA-256 is
+`3482e26469ea8b974b3a3e24a934639a2d453741eb8cf7f8677c96507084259e`,
+verified again after downloading the published asset from GitHub.
 
 ## Specification and adversarial review
 
@@ -54,7 +57,7 @@ The targeted lock and restore suites passed with 34 tests after all fixes.
 | Protection reversal | `acceptance.test.ts` restores the generated protection snapshot. | Pass in clean local install and CI. |
 | Tamper rejection before mutation | Repository and restore preflight tests cover digest, manifest and symlink tampering. | Pass in clean local install and CI. |
 | Rollback and manual recovery | Fault-injection restore tests cover stage/rename/sync/chmod failures and recovery material. | Pass in the 98-test suite. |
-| Three operating systems | `.github/workflows/ci.yml` covers Ubuntu, macOS and Windows for Node 22/24. | Pass: [GitHub Actions run 32389095727](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389095727). |
+| Three operating systems | `.github/workflows/ci.yml` covers Ubuntu, macOS and Windows for Node 22/24. | Pass: [GitHub Actions run 32389906039](https://github.com/jackxu3111/dsh-snapshot/actions/runs/32389906039). |
 | Package contents | Normal `npm pack --dry-run` listed 41 files: `dist`, patch, READMEs, LICENSE and metadata; no source, tests, snapshots or credentials. | Pass locally and in GitHub Actions. |
 
 ## Final verification command set
